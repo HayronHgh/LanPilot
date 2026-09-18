@@ -16,7 +16,8 @@ Import-Module (Join-Path $PSScriptRoot 'TlsConnectionSettings.psm1') -Force
 Assert-LanPilotLocalPath $ConfigPath
 Assert-LanPilotLocalPath $ViewerPath
 $settings=[pscustomobject]@{schema=1;transport='tls';host='';port=45443;clientCertificate='';serverFingerprint='';rootDer='';crlDer='';control='view-only';visual='h264-only'}
-if(Test-Path -LiteralPath $ConfigPath){$settings=Read-LanPilotTlsSettings $ConfigPath}
+$loadedPairing=$false
+if(Test-Path -LiteralPath $ConfigPath){$settings=Read-LanPilotTlsSettings $ConfigPath; $loadedPairing=$true}
 elseif($ConnectImmediately -or $ValidateOnly -or $CheckReadiness){throw 'Create a TLS connection profile first.'}
 if(-not $ConnectImmediately -and -not $ValidateOnly -and -not $CheckReadiness){
     Add-Type -AssemblyName System.Windows.Forms
@@ -65,8 +66,7 @@ if(-not $ConnectImmediately -and -not $ValidateOnly -and -not $CheckReadiness){
         $fields[$name]=$box
     }
     $info=[Windows.Forms.Label]::new(); $info.SetBounds(24,120,650,46)
-    $paired=Test-Path -LiteralPath $ConfigPath -PathType Leaf
-    $info.Text=if($paired){'Saved pairing loaded. Usually only the Mac IP needs changing. The paired identity is still verified when connecting.'}else{'No saved pairing. This build requires provisioned identities in Advanced settings; automatic first-time pairing is not available yet.'}
+    $info.Text=if($loadedPairing){'Saved pairing loaded. Usually only the Mac IP needs changing. The paired identity is still verified when connecting.'}else{'No saved pairing. This build requires provisioned identities in Advanced settings; automatic first-time pairing is not available yet.'}
     $form.Controls.Add($info)
     $toggle=[Windows.Forms.CheckBox]::new(); $toggle.Text='Advanced settings'; $toggle.SetBounds(24,176,230,26); $form.Controls.Add($toggle)
     $errorLabel=[Windows.Forms.Label]::new(); $errorLabel.ForeColor=[Drawing.Color]::Firebrick; $errorLabel.SetBounds(24,212,445,56); $form.Controls.Add($errorLabel)
@@ -77,6 +77,8 @@ if(-not $ConnectImmediately -and -not $ValidateOnly -and -not $CheckReadiness){
         $errorLabel.Top=if($toggle.Checked){606}else{212}
         $connect.Top=if($toggle.Checked){634}else{230}
     })
+    $profileLabel=[Windows.Forms.Label]::new(); $profileLabel.SetBounds(24,355,650,32)
+    $profileLabel.Text='Profile: '+$ConfigPath; $advanced.Controls.Add($profileLabel)
     $connect.Add_Click({
         try {
             if($fields.port.Text -notmatch '^[1-9][0-9]{0,4}$'){throw 'Enter a canonical port number.'}
@@ -92,12 +94,14 @@ if(-not $ConnectImmediately -and -not $ValidateOnly -and -not $CheckReadiness){
     })
     try{
         if($CheckLayout){
+            if(-not $loadedPairing){throw "No saved pairing loaded from: $ConfigPath"}
+            $null=Get-LanPilotTlsArguments $settings
             foreach($name in @('host','port','clientCertificate','serverFingerprint','rootDer','crlDer')){
                 if($fields[$name].Text -cne [string]($settings.PSObject.Properties[$name].Value)){throw "Saved field not bound: $name"}
             }
             if($advanced.Visible -or $form.ClientSize.Height -ne 280){throw 'Advanced settings must start collapsed'}
             if(@($advanced.Controls | Where-Object {$_ -is [Windows.Forms.Button]}).Count -ne 2){throw 'Trust file browsers missing'}
-            Write-Output 'TLS layout PASS: saved fields bound, advanced collapsed, file browsers=2; UI=0 network=0'
+            Write-Output 'TLS layout PASS: pairing_loaded=1 identity_fields_valid=1 saved fields bound, advanced collapsed, file browsers=2; UI=0 network=0'
             return
         }
         if($form.ShowDialog() -ne [Windows.Forms.DialogResult]::OK){return}

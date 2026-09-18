@@ -1,11 +1,13 @@
 [CmdletBinding()]
-param([ValidateSet('choose','tls','ssh')][string]$Connection='choose')
+param([ValidateSet('choose','tls','ssh','configure')][string]$Connection='choose',
+      [switch]$CheckLayout)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
+    if($CheckLayout){$Connection='configure'}
     if($Connection -eq 'choose') {
         $form=[Windows.Forms.Form]::new()
         $form.Text='LanPilot - Connect'
@@ -37,9 +39,9 @@ try {
         & (Join-Path $PSScriptRoot 'Start-DesktopPreview.ps1')
     } else {
         $immediate=$selected -eq 'tls'
-        $profile=Join-Path $env:LOCALAPPDATA 'LanPilot\tls-desktop.json'
-        if(-not (Test-Path -LiteralPath $profile -PathType Leaf)){$immediate=$false}
-        & (Join-Path $PSScriptRoot 'Start-LanPilotTls.ps1') -ConnectImmediately:$immediate
+        $tlsProfilePath=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'LanPilot\tls-desktop.json'
+        if(-not (Test-Path -LiteralPath $tlsProfilePath -PathType Leaf)){$immediate=$false}
+        & (Join-Path $PSScriptRoot 'Start-LanPilotTls.ps1') -ConfigPath $tlsProfilePath -ViewerPath (Join-Path $PSScriptRoot 'rwn-viewer.exe') -ConnectImmediately:$immediate -CheckLayout:$CheckLayout
     }
 } catch {
     [Windows.Forms.MessageBox]::Show($_.Exception.Message,'LanPilot - Connection failed',
