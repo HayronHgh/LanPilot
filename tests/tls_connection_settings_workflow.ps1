@@ -55,6 +55,24 @@ try{
     $copy=$settings | ConvertTo-Json | ConvertFrom-Json
     $copy | Add-Member NoteProperty privateKey 'not-allowed'
     Reject {Get-LanPilotTlsArguments $copy}
+    Save-LanPilotRecovery $profile
+    $protected=[IO.File]::ReadAllBytes($profile+'.recovery')
+    $before=(Get-FileHash -LiteralPath $profile).Hash
+    $damaged=[byte[]]$protected.Clone(); $damaged[20]=$damaged[20] -bxor 1
+    [IO.File]::WriteAllBytes($profile+'.recovery',$damaged)
+    Reject {Restore-LanPilotRecovery $profile}
+    if((Get-FileHash -LiteralPath $profile).Hash -ne $before){throw 'Tampered recovery changed profile'}
+    [IO.File]::WriteAllBytes($profile+'.recovery',$protected)
+    Remove-Item -LiteralPath $rootDer
+    $restored=Restore-LanPilotRecovery $profile
+    if($restored.serverFingerprint -cne $settings.serverFingerprint -or
+       $restored.clientCertificate -cne $settings.clientCertificate -or
+       $restored.control -ne 'view-only' -or
+       [Convert]::ToBase64String([IO.File]::ReadAllBytes($restored.rootDer)) -ne 'AQID'){
+        throw 'Recovery changed identity, grant or canonical trust bytes'
+    }
+    [IO.File]::WriteAllBytes($rootDer,[byte[]]@(1,2,3))
+    Save-LanPilotTlsSettings $profile $settings
     [IO.File]::WriteAllBytes($crlDer,[byte[]]::new(65537))
     & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout -ExpectUnavailable
     if($LASTEXITCODE -ne 0){throw 'Broken pairing must remain fail closed'}
@@ -62,6 +80,10 @@ try{
     if(@(Get-ChildItem -LiteralPath $testRoot -Filter '*.tmp').Count){throw 'Temporary profile leaked'}
     Write-Output 'PASS TLS settings: argument boundaries, atomic persistence, view-only default, invalid types/modes/paths/size/unknown-field rejection; network=0 UI=0'
 }finally{
-    foreach($file in @($rootDer,$crlDer,$profile)){if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}}
+    foreach($dir in @(Get-ChildItem -LiteralPath $testRoot -Directory -Filter 'recovered-trust-*')){
+        foreach($name in @('root.der','revocation.der')){Remove-Item -LiteralPath (Join-Path $dir.FullName $name) -ErrorAction SilentlyContinue}
+        Remove-Item -LiteralPath $dir.FullName
+    }
+    foreach($file in @($rootDer,$crlDer,$profile,($profile+'.recovery'))){if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}}
     if(@(Get-ChildItem -LiteralPath $testRoot -Force).Count -eq 0){Remove-Item -LiteralPath $testRoot}
 }

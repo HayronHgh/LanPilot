@@ -91,4 +91,57 @@ function Test-LanPilotTlsReadiness($Settings) {
         $store.Dispose()
     }
 }
-Export-ModuleMember -Function Get-LanPilotTlsArguments,Read-LanPilotTlsSettings,Save-LanPilotTlsSettings,Assert-LanPilotLocalPath,Assert-LanPilotClientIdentity,Test-LanPilotTlsReadiness
+function Save-LanPilotRecovery([string]$ConfigPath) {
+    # Local configuration recovery, NOT proof of a successful remote pairing.
+    $settings=Read-LanPilotTlsSettings $ConfigPath
+    $record=[ordered]@{schema=1;settings=$settings;
+        root=[Convert]::ToBase64String([IO.File]::ReadAllBytes($settings.rootDer));
+        crl=[Convert]::ToBase64String([IO.File]::ReadAllBytes($settings.crlDer))}
+    Add-Type -AssemblyName System.Security
+    $plain=[Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Depth 4 -Compress))
+    try {$sealed=[Security.Cryptography.ProtectedData]::Protect($plain,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)}
+    finally {[Array]::Clear($plain,0,$plain.Length)}
+    if($sealed.Length -gt 262144){throw 'Recovery record exceeds bounds.'}
+    $path=$ConfigPath+'.recovery'; $temporary=$path+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        [IO.File]::WriteAllBytes($temporary,$sealed)
+        if(Test-Path -LiteralPath $path){[IO.File]::Replace($temporary,$path,[NullString]::Value)}
+        else{[IO.File]::Move($temporary,$path)}
+    } finally {if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary}}
+}
+
+function Restore-LanPilotRecovery([string]$ConfigPath) {
+    Assert-LanPilotLocalPath $ConfigPath
+    $path=$ConfigPath+'.recovery'
+    $file=Get-Item -LiteralPath $path -ErrorAction Stop
+    if($file.PSIsContainer -or $file.Length -lt 1 -or $file.Length -gt 262144){throw 'Invalid recovery record.'}
+    Add-Type -AssemblyName System.Security
+    $plain=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($path),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+    try {$record=[Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json}
+    finally {[Array]::Clear($plain,0,$plain.Length)}
+    if($record.schema -ne 1){throw 'Unsupported recovery record.'}
+    $rootBytes=[Convert]::FromBase64String($record.root)
+    $crlBytes=[Convert]::FromBase64String($record.crl)
+    if($rootBytes.Length -lt 1 -or $rootBytes.Length -gt 65536 -or $crlBytes.Length -lt 1 -or $crlBytes.Length -gt 65536){throw 'Recovery trust data outside bounds.'}
+    # Never overwrite trust files or keys. Restore the protected bytes into a
+    # new local directory; native TLS still checks pin, chain and revocation.
+    $parent=Split-Path -Parent $ConfigPath
+    $cursor=Get-Item -LiteralPath $parent
+    while($null -ne $cursor){
+        if($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked recovery directory rejected.'}
+        $cursor=$cursor.Parent
+    }
+    $directory=Join-Path $parent ('recovered-trust-'+[Guid]::NewGuid().ToString('N'))
+    $null=New-Item -ItemType Directory -Path $directory
+    $settings=$record.settings
+    $settings.rootDer=Join-Path $directory 'root.der'
+    $settings.crlDer=Join-Path $directory 'revocation.der'
+    [IO.File]::WriteAllBytes($settings.rootDer,$rootBytes)
+    [IO.File]::WriteAllBytes($settings.crlDer,$crlBytes)
+    # Recovery never silently restores remote-control permission.
+    $settings.control='view-only'
+    $null=Get-LanPilotTlsArguments $settings
+    Save-LanPilotTlsSettings $ConfigPath $settings
+    return $settings
+}
+Export-ModuleMember -Function Get-LanPilotTlsArguments,Read-LanPilotTlsSettings,Save-LanPilotTlsSettings,Assert-LanPilotLocalPath,Assert-LanPilotClientIdentity,Test-LanPilotTlsReadiness,Save-LanPilotRecovery,Restore-LanPilotRecovery

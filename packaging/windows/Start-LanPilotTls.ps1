@@ -51,13 +51,21 @@ if((-not $ConnectImmediately) -or (-not $state.Ready) -or $CheckLayout){
             $status.Text='Paired device loaded. Confirm the Mac address and connect. Identity is verified again on every connection.'
             $status.ForeColor=[Drawing.Color]::DarkGreen
         } else {
-            $status.Text=if(Test-Path -LiteralPath $ConfigPath){'Your saved pairing needs repair. Connection is disabled to protect your device. No certificate entry is required; see Diagnostics.'}else{'This Windows account has no saved pairing. First-time secure pairing is not available in this build yet. Do not enter or share private keys.'}
+            $status.Text=if(Test-Path -LiteralPath ($ConfigPath+'.recovery')){'Saved connection is unavailable. Choose Repair connection to restore this Windows account''s protected settings. Remote identity will still be verified.'}else{'No usable saved connection. First-time secure pairing is not available in this build yet. No private keys or certificate details need to be typed here.'}
             $status.ForeColor=[Drawing.Color]::Firebrick
         }
         $connect.Enabled=$state.Ready
+        $retry.Text=if(-not $state.Ready -and (Test-Path -LiteralPath ($ConfigPath+'.recovery'))){'Repair connection'}else{'Check again'}
     }
     & $refresh
-    $retry.Add_Click({Read-SavedPairing; & $refresh})
+    $retry.Add_Click({
+        try {
+            if(-not $state.Ready -and (Test-Path -LiteralPath ($ConfigPath+'.recovery'))){
+                $null=Restore-LanPilotRecovery $ConfigPath
+            }
+            Read-SavedPairing; & $refresh
+        } catch {$state.Error=$_.Exception.Message; $status.Text='Repair could not complete. No remote identity was trusted. See Diagnostics.'}
+    })
     $details.Add_Click({
         [Windows.Forms.MessageBox]::Show(('Pairing profile: '+$ConfigPath+[Environment]::NewLine+$state.Error),'LanPilot diagnostics') | Out-Null
     })
@@ -70,6 +78,7 @@ if((-not $ConnectImmediately) -or (-not $state.Ready) -or $CheckLayout){
             $null=Test-LanPilotTlsReadiness $candidate
             if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer is missing. Reinstall the verified LanPilot package.'}
             Save-LanPilotTlsSettings $ConfigPath $candidate
+            Save-LanPilotRecovery $ConfigPath
             $state.Settings=$candidate
             $form.DialogResult=[Windows.Forms.DialogResult]::OK; $form.Close()
         } catch {$status.Text='Cannot connect: '+$_.Exception.Message; $status.ForeColor=[Drawing.Color]::Firebrick}
