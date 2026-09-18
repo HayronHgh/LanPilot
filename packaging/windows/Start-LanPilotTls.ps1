@@ -1,127 +1,101 @@
 [CmdletBinding()]
-param(
-    [string]$ConfigPath='',
-    [string]$ViewerPath='',
-    [switch]$ConnectImmediately,
-    [switch]$ValidateOnly,
-    [switch]$CheckReadiness,
-    [switch]$CheckLayout
-)
+param([string]$ConfigPath='',[string]$ViewerPath='',
+      [switch]$ConnectImmediately,[switch]$ValidateOnly,
+      [switch]$CheckReadiness,[switch]$CheckLayout,[switch]$ExpectUnavailable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if(-not $ViewerPath){$ViewerPath=Join-Path $PSScriptRoot 'rwn-viewer.exe'}
 if(-not $ConfigPath){$ConfigPath=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'LanPilot\tls-desktop.json'}
-if($ValidateOnly -and $CheckReadiness){throw 'Choose either configuration validation or local identity readiness.'}
 Import-Module (Join-Path $PSScriptRoot 'TlsConnectionSettings.psm1') -Force
 Assert-LanPilotLocalPath $ConfigPath
 Assert-LanPilotLocalPath $ViewerPath
-$settings=[pscustomobject]@{schema=1;transport='tls';host='';port=45443;clientCertificate='';serverFingerprint='';rootDer='';crlDer='';control='view-only';visual='h264-only'}
-$loadedPairing=$false
-if(Test-Path -LiteralPath $ConfigPath){$settings=Read-LanPilotTlsSettings $ConfigPath; $loadedPairing=$true}
-elseif($ConnectImmediately -or $ValidateOnly -or $CheckReadiness){throw 'Create a TLS connection profile first.'}
-if(-not $ConnectImmediately -and -not $ValidateOnly -and -not $CheckReadiness){
+if($ValidateOnly -and $CheckReadiness){throw 'Choose one diagnostic check.'}
+if($ValidateOnly -or $CheckReadiness){
+    $saved=Read-LanPilotTlsSettings $ConfigPath
+    if($CheckReadiness){$null=Test-LanPilotTlsReadiness $saved}
+    Write-Output 'TLS profile valid; no connection started, peer not authenticated.'
+    return
+}
+$state=@{Settings=$null;Error='';Ready=$false}
+function Read-SavedPairing {
+    $state.Settings=$null; $state.Ready=$false; $state.Error=''
+    try {
+        $state.Settings=Read-LanPilotTlsSettings $ConfigPath
+        if(-not $CheckLayout){$null=Test-LanPilotTlsReadiness $state.Settings}
+        $state.Ready=$true
+    } catch {$state.Error=$_.Exception.Message}
+}
+Read-SavedPairing
+if((-not $ConnectImmediately) -or (-not $state.Ready) -or $CheckLayout){
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
     $form=[Windows.Forms.Form]::new()
     $form.Text='LanPilot - Connect to Mac'
-    $form.ClientSize=[Drawing.Size]::new(700,280)
+    $form.ClientSize=[Drawing.Size]::new(560,330)
     $form.StartPosition='CenterScreen'; $form.FormBorderStyle='FixedDialog'; $form.MaximizeBox=$false
     $form.AutoScaleMode='Dpi'; $form.Font=[Drawing.Font]::new('Segoe UI',10)
-    $fields=@{}
-    $advanced=[Windows.Forms.Panel]::new(); $advanced.SetBounds(0,210,700,390)
-    $advanced.Visible=$false; $form.Controls.Add($advanced)
-    $y=0
-    foreach($name in @('host','port','clientCertificate','serverFingerprint','rootDer','crlDer')){
-        $labels=@{host='Mac IP / hostname';port='TLS port';clientCertificate='Paired Windows identity (SHA-1)';serverFingerprint='Paired Mac identity (SHA-256)';rootDer='CA certificate (.der)';crlDer='Revocation list (.der)'}
-        $parent=$advanced; $top=$y
-        if($name -eq 'host'){$parent=$form; $top=16}else{$y+=62}
-        $label=[Windows.Forms.Label]::new(); $label.Text=$labels[$name]; $label.SetBounds(24,$top,650,20); $parent.Controls.Add($label)
-        $field=[Windows.Forms.TextBox]::new(); $field.MaxLength=2048
-        $field.Text=[string]($settings.PSObject.Properties[$name].Value)
-        $field.AccessibleName=$labels[$name]; $field.SetBounds(24,($top+22),650,26)
-        $parent.Controls.Add($field); $fields[$name]=$field
-        if($name -in @('rootDer','crlDer')){
-            $field.Width=540
-            $browse=[Windows.Forms.Button]::new(); $browse.Text='Browse...'; $browse.Tag=$field
-            $browse.SetBounds(576,($top+20),98,30); $parent.Controls.Add($browse)
-            $browse.Add_Click({
-                $dialog=[Windows.Forms.OpenFileDialog]::new()
-                $dialog.Filter='DER files (*.der)|*.der|All files (*.*)|*.*'
-                $dialog.CheckFileExists=$true; $dialog.Multiselect=$false
-                try {if($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK){$this.Tag.Text=$dialog.FileName}} finally {$dialog.Dispose()}
-            })
-        }
-    }
-    foreach($name in @('control','visual')){
-        $box=[Windows.Forms.ComboBox]::new(); $box.DropDownStyle='DropDownList'; $box.AccessibleName=$name
-        if($name -eq 'control'){
-            $null=$box.Items.AddRange([object[]]@('View only','Control keyboard and mouse'))
-            $box.SelectedIndex=if($settings.control -eq 'interactive'){1}else{0}
-            $box.SetBounds(24,82,370,28); $form.Controls.Add($box)
+    $label=[Windows.Forms.Label]::new(); $label.Text='Mac IP / hostname'; $label.SetBounds(24,28,500,22); $form.Controls.Add($label)
+    $address=[Windows.Forms.TextBox]::new(); $address.AccessibleName='Mac IP / hostname'; $address.MaxLength=253; $address.SetBounds(24,58,512,28); $form.Controls.Add($address)
+    $control=[Windows.Forms.ComboBox]::new(); $control.AccessibleName='Connection permissions'; $control.DropDownStyle='DropDownList'
+    $null=$control.Items.AddRange([object[]]@('View only','Control keyboard and mouse')); $control.SelectedIndex=0
+    $control.SetBounds(24,108,512,30); $form.Controls.Add($control)
+    $status=[Windows.Forms.Label]::new(); $status.SetBounds(24,164,512,94); $form.Controls.Add($status)
+    $retry=[Windows.Forms.Button]::new(); $retry.Text='Check again'; $retry.SetBounds(24,276,130,32); $form.Controls.Add($retry)
+    $details=[Windows.Forms.Button]::new(); $details.Text='Diagnostics'; $details.SetBounds(166,276,130,32); $form.Controls.Add($details)
+    $connect=[Windows.Forms.Button]::new(); $connect.Text='Connect'; $connect.SetBounds(366,276,170,32); $form.Controls.Add($connect); $form.AcceptButton=$connect
+    $refresh={
+        if($state.Ready){
+            $address.Text=$state.Settings.host
+            $control.SelectedIndex=if($state.Settings.control -eq 'interactive'){1}else{0}
+            $status.Text='Paired device loaded. Confirm the Mac address and connect. Identity is verified again on every connection.'
+            $status.ForeColor=[Drawing.Color]::DarkGreen
         } else {
-            $null=$box.Items.AddRange([object[]]@('h264-only','exact-only')); $box.SelectedItem=$settings.visual
-            $box.SetBounds(24,320,300,28); $advanced.Controls.Add($box)
+            $status.Text=if(Test-Path -LiteralPath $ConfigPath){'Your saved pairing needs repair. Connection is disabled to protect your device. No certificate entry is required; see Diagnostics.'}else{'This Windows account has no saved pairing. First-time secure pairing is not available in this build yet. Do not enter or share private keys.'}
+            $status.ForeColor=[Drawing.Color]::Firebrick
         }
-        $fields[$name]=$box
+        $connect.Enabled=$state.Ready
     }
-    $info=[Windows.Forms.Label]::new(); $info.SetBounds(24,120,650,46)
-    $info.Text=if($loadedPairing){'Saved pairing loaded. Usually only the Mac IP needs changing. The paired identity is still verified when connecting.'}else{'No saved pairing. This build requires provisioned identities in Advanced settings; automatic first-time pairing is not available yet.'}
-    $form.Controls.Add($info)
-    $toggle=[Windows.Forms.CheckBox]::new(); $toggle.Text='Advanced settings'; $toggle.SetBounds(24,176,230,26); $form.Controls.Add($toggle)
-    $errorLabel=[Windows.Forms.Label]::new(); $errorLabel.ForeColor=[Drawing.Color]::Firebrick; $errorLabel.SetBounds(24,212,445,56); $form.Controls.Add($errorLabel)
-    $connect=[Windows.Forms.Button]::new(); $connect.Text='Connect'; $connect.SetBounds(484,230,190,32); $form.Controls.Add($connect); $form.AcceptButton=$connect
-    $toggle.Add_CheckedChanged({
-        $advanced.Visible=$toggle.Checked
-        $form.ClientSize=[Drawing.Size]::new(700,$(if($toggle.Checked){680}else{280}))
-        $errorLabel.Top=if($toggle.Checked){606}else{212}
-        $connect.Top=if($toggle.Checked){634}else{230}
+    & $refresh
+    $retry.Add_Click({Read-SavedPairing; & $refresh})
+    $details.Add_Click({
+        [Windows.Forms.MessageBox]::Show(('Pairing profile: '+$ConfigPath+[Environment]::NewLine+$state.Error),'LanPilot diagnostics') | Out-Null
     })
-    $profileLabel=[Windows.Forms.Label]::new(); $profileLabel.SetBounds(24,355,650,32)
-    $profileLabel.Text='Profile: '+$ConfigPath; $advanced.Controls.Add($profileLabel)
     $connect.Add_Click({
         try {
-            if($fields.port.Text -notmatch '^[1-9][0-9]{0,4}$'){throw 'Enter a canonical port number.'}
-            foreach($name in @('host','clientCertificate','serverFingerprint','rootDer','crlDer')){$settings.$name=$fields[$name].Text.Trim()}
-            $settings.port=[int]$fields.port.Text
-            $settings.control=if($fields.control.SelectedIndex -eq 1){'interactive'}else{'view-only'}; $settings.visual=[string]$fields.visual.SelectedItem
-            $null=Get-LanPilotTlsArguments $settings
-            if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer executable is missing.'}
-            $null=Test-LanPilotTlsReadiness $settings
-            Save-LanPilotTlsSettings $ConfigPath $settings
+            $candidate=$state.Settings | ConvertTo-Json | ConvertFrom-Json
+            $candidate.host=$address.Text.Trim()
+            $candidate.control=if($control.SelectedIndex -eq 1){'interactive'}else{'view-only'}
+            $null=Get-LanPilotTlsArguments $candidate
+            $null=Test-LanPilotTlsReadiness $candidate
+            if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer is missing. Reinstall the verified LanPilot package.'}
+            Save-LanPilotTlsSettings $ConfigPath $candidate
+            $state.Settings=$candidate
             $form.DialogResult=[Windows.Forms.DialogResult]::OK; $form.Close()
-        } catch {$errorLabel.Text=$_.Exception.Message}
+        } catch {$status.Text='Cannot connect: '+$_.Exception.Message; $status.ForeColor=[Drawing.Color]::Firebrick}
     })
-    try{
+    try {
         if($CheckLayout){
-            if(-not $loadedPairing){throw "No saved pairing loaded from: $ConfigPath"}
-            $null=Get-LanPilotTlsArguments $settings
-            foreach($name in @('host','port','clientCertificate','serverFingerprint','rootDer','crlDer')){
-                if($fields[$name].Text -cne [string]($settings.PSObject.Properties[$name].Value)){throw "Saved field not bound: $name"}
+            if($ExpectUnavailable){
+                if($state.Ready -or $connect.Enabled){throw 'Unavailable pairing allowed connection'}
+                if(@($form.Controls | Where-Object {$_ -is [Windows.Forms.TextBox]}).Count -ne 1){throw 'Unavailable pairing exposes trust entry'}
+                Write-Output 'TLS unavailable layout PASS: connect_disabled=1 trust_fields=0; UI=0 network=0'
+                return
             }
-            if($advanced.Visible -or $form.ClientSize.Height -ne 280){throw 'Advanced settings must start collapsed'}
-            if(@($advanced.Controls | Where-Object {$_ -is [Windows.Forms.Button]}).Count -ne 2){throw 'Trust file browsers missing'}
-            Write-Output 'TLS layout PASS: pairing_loaded=1 identity_fields_valid=1 saved fields bound, advanced collapsed, file browsers=2; UI=0 network=0'
+            if(-not $state.Ready){throw 'Expected existing valid pairing for layout check.'}
+            if($address.Text -cne $state.Settings.host -or -not $connect.Enabled){throw 'Saved device not bound'}
+            if(@($form.Controls | Where-Object {$_ -is [Windows.Forms.TextBox]}).Count -ne 1){throw 'User must not edit trust fields'}
+            Write-Output 'TLS layout PASS: pairing_loaded=1 editable_text_fields=1 trust_fields=0; UI=0 network=0'
             return
         }
         if($form.ShowDialog() -ne [Windows.Forms.DialogResult]::OK){return}
-    }finally{$form.Dispose()}
+    } finally {$form.Dispose()}
 }
-$arguments=Get-LanPilotTlsArguments $settings
-if($ValidateOnly){Write-Output 'TLS profile valid; no connection started, certificates not authenticated.'; return}
-$readiness=Test-LanPilotTlsReadiness $settings
-if($CheckReadiness){
-    Write-Output ('Local client identity ready; expires UTC '+$readiness.ExpiresUtc.ToString('o')+'. Peer not authenticated; no connection started.')
-    return
-}
-if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer executable is missing.'}
-# Launch the GUI explicitly; do not inherit a hidden PowerShell window's show
-# command. Read current trust paths from the profile, not stale shortcut argv.
+$arguments=Get-LanPilotTlsArguments $state.Settings
+$null=Test-LanPilotTlsReadiness $state.Settings
+if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer is missing. Reinstall the verified LanPilot package.'}
 $start=[Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($ViewerPath))
-$start.UseShellExecute=$true
-$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Normal
+$start.UseShellExecute=$true; $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Normal
 $start.WorkingDirectory=Split-Path -Parent ([IO.Path]::GetFullPath($ViewerPath))
-# Validated arguments cannot contain quotes; trust paths refer to regular files
-# and cannot end in a directory separator. Quote every argument for spaces.
 $start.Arguments=(@($arguments | ForEach-Object {'"'+$_+'"'}) -join ' ')
 $null=[Diagnostics.Process]::Start($start)

@@ -35,6 +35,8 @@ try{
     if($LASTEXITCODE -ne 0){throw 'Fresh Windows PowerShell launcher failed'}
     & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout
     if($LASTEXITCODE -ne 0){throw 'Saved TLS fields or simplified layout failed'}
+    & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath (Join-Path $testRoot 'missing.json') -CheckLayout -ExpectUnavailable
+    if($LASTEXITCODE -ne 0){throw 'Missing pairing must disable connection without trust entry'}
     # Read-only store lookup must fail before launching a Viewer for this absent identity.
     Reject {& (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckReadiness}
     Reject {& (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckReadiness -ValidateOnly}
@@ -54,6 +56,8 @@ try{
     $copy | Add-Member NoteProperty privateKey 'not-allowed'
     Reject {Get-LanPilotTlsArguments $copy}
     [IO.File]::WriteAllBytes($crlDer,[byte[]]::new(65537))
+    & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout -ExpectUnavailable
+    if($LASTEXITCODE -ne 0){throw 'Broken pairing must remain fail closed'}
     Reject {Get-LanPilotTlsArguments $settings}
     if(@(Get-ChildItem -LiteralPath $testRoot -Filter '*.tmp').Count){throw 'Temporary profile leaked'}
     Write-Output 'PASS TLS settings: argument boundaries, atomic persistence, view-only default, invalid types/modes/paths/size/unknown-field rejection; network=0 UI=0'
