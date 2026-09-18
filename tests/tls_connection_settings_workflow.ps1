@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $packaging=[IO.Path]::GetFullPath($PackagingDirectory)
 Import-Module (Join-Path $packaging 'TlsConnectionSettings.psm1') -Force
-foreach($name in @('Start-LanPilotTls.ps1','TlsConnectionSettings.psm1')){
+foreach($name in @('Start-LanPilot.ps1','Start-LanPilotTls.ps1','TlsConnectionSettings.psm1')){
     $tokens=$null; $errors=$null
     $null=[Management.Automation.Language.Parser]::ParseFile((Join-Path $packaging $name),[ref]$tokens,[ref]$errors)
     if($errors.Count){throw "Parse failed: $name"}
@@ -28,6 +28,11 @@ try{
         if($actual.control -ne $control -or $actual.rootDer -ne $rootDer){throw 'Roundtrip failed'}
     }
     & (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -ValidateOnly
+    # Match desktop shortcut execution: a fresh Windows PowerShell -File host,
+    # not an in-process script invocation. Resolve default ViewerPath there too.
+    $windowsHost=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -ValidateOnly
+    if($LASTEXITCODE -ne 0){throw 'Fresh Windows PowerShell launcher failed'}
     # Read-only store lookup must fail before launching a Viewer for this absent identity.
     Reject {& (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckReadiness}
     Reject {& (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckReadiness -ValidateOnly}

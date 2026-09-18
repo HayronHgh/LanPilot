@@ -72,3 +72,10 @@ SSH 金鑰、系統遠端登入與 macOS 權限不會隨程式移除而自動刪
 - 視窗放大但畫面不放大：測試程式可能用了1:1；一般啟動器使用 Fit。
 
 專案：https://github.com/HayronHgh/LanPilot
+# Unified Windows entry
+
+The existing Remote Workspace shortcut opens the LanPilot connection chooser:
+latest TLS, TLS settings, or the original SSH connection. Both paths use the
+same installed Viewer; their saved profiles remain separate and are preserved.
+TLS requires already-provisioned paired identities. No unattended updater is
+installed: install a verified new package to update the stable user-local path.

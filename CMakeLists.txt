@@ -130,6 +130,7 @@ if(RWN_BUILD_PACKAGING)
     install(PROGRAMS
       packaging/windows/Install-DesktopPreview.ps1
       packaging/windows/Start-DesktopPreview.ps1
+      packaging/windows/Start-LanPilot.ps1
       packaging/windows/Start-LanPilotTls.ps1
       packaging/windows/TlsConnectionSettings.psm1
       packaging/windows/Uninstall-DesktopPreview.ps1

@@ -54,7 +54,8 @@ $sourceLauncher = Join-Path $PSScriptRoot 'Start-DesktopPreview.ps1'
 $sourceUninstaller = Join-Path $PSScriptRoot 'Uninstall-DesktopPreview.ps1'
 $sourceTlsLauncher = Join-Path $PSScriptRoot 'Start-LanPilotTls.ps1'
 $sourceTlsSettings = Join-Path $PSScriptRoot 'TlsConnectionSettings.psm1'
-$sources=@($sourceViewer, $sourceLauncher, $sourceUninstaller, $sourceTlsLauncher, $sourceTlsSettings)
+$sourceUnifiedLauncher = Join-Path $PSScriptRoot 'Start-LanPilot.ps1'
+$sources=@($sourceViewer, $sourceLauncher, $sourceUninstaller, $sourceTlsLauncher, $sourceTlsSettings, $sourceUnifiedLauncher)
 foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Release package is incomplete: $source"
@@ -89,8 +90,7 @@ $shortcutPath = Join-Path $desktop 'Remote Workspace.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$launcher = Join-Path $InstallRoot 'Start-DesktopPreview.ps1'
-if ($Transport -eq 'tls') { $launcher = Join-Path $InstallRoot 'Start-LanPilotTls.ps1' }
+$launcher = Join-Path $InstallRoot 'Start-LanPilot.ps1'
 $shortcut.Arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
 $shortcut.WorkingDirectory = $InstallRoot
 $shortcut.Description = 'Configure and connect to a Remote Workspace Mac'

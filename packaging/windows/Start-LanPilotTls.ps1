@@ -1,13 +1,14 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath=(Join-Path $env:LOCALAPPDATA 'LanPilot\tls-desktop.json'),
-    [string]$ViewerPath=(Join-Path $PSScriptRoot 'rwn-viewer.exe'),
+    [string]$ViewerPath='',
     [switch]$ConnectImmediately,
     [switch]$ValidateOnly,
     [switch]$CheckReadiness
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+if(-not $ViewerPath){$ViewerPath=Join-Path $PSScriptRoot 'rwn-viewer.exe'}
 if($ValidateOnly -and $CheckReadiness){throw 'Choose either configuration validation or local identity readiness.'}
 Import-Module (Join-Path $PSScriptRoot 'TlsConnectionSettings.psm1') -Force
 Assert-LanPilotLocalPath $ConfigPath
@@ -63,4 +64,13 @@ if($CheckReadiness){
     return
 }
 if(-not (Test-Path -LiteralPath $ViewerPath -PathType Leaf)){throw 'Viewer executable is missing.'}
-& $ViewerPath @arguments
+# Launch the GUI explicitly; do not inherit a hidden PowerShell window's show
+# command. Read current trust paths from the profile, not stale shortcut argv.
+$start=[Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($ViewerPath))
+$start.UseShellExecute=$true
+$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Normal
+$start.WorkingDirectory=Split-Path -Parent ([IO.Path]::GetFullPath($ViewerPath))
+# Validated arguments cannot contain quotes; trust paths refer to regular files
+# and cannot end in a directory separator. Quote every argument for spaces.
+$start.Arguments=(@($arguments | ForEach-Object {'"'+$_+'"'}) -join ' ')
+$null=[Diagnostics.Process]::Start($start)
