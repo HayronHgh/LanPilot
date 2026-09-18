@@ -1,4 +1,5 @@
 #include "rwn/platform/macos/network_transport.hpp"
+#include "rwn/platform/macos/tcp_listener.hpp"
 
 #include "rwn/core/content_hash.hpp"
 
@@ -7,6 +8,8 @@
 #import <Security/Security.h>
 
 #include <algorithm>
+#include <arpa/inet.h>
+#include <atomic>
 #include <array>
 #include <condition_variable>
 #include <cstdlib>
@@ -21,6 +24,13 @@
 #include <vector>
 
 namespace rwn::platform::macos {
+rwn::transport::ChannelSessionId new_tcp_session_id() {
+    rwn::transport::ChannelSessionId result{};
+    if (SecRandomCopyBytes(kSecRandomDefault, result.size(), result.data()) != errSecSuccess ||
+        std::all_of(result.begin(), result.end(), [](auto value) { return value == 0; }))
+        throw std::runtime_error("secure TCP session ID generation failed");
+    return result;
+}
 namespace {
 
 using namespace rwn::transport;
@@ -127,17 +137,53 @@ private:
 [[nodiscard]] bool verify_peer(
     sec_trust_t sec_trust, const bool peer_is_server,
     const std::string& hostname,
-    const std::vector<CertificateSha256>& allowlist) {
+    const std::vector<CertificateSha256>& allowlist,
+    const std::vector<std::byte>& exclusive_root_der = {},
+    const bool require_positive_revocation = false,
+    const std::vector<std::byte>& ocsp_response_der = {},
+    const bool allow_network_fetch = true) {
     const CfOwner<SecTrustRef> trust(sec_trust_copy_ref(sec_trust));
     if (trust.get() == nullptr) return false;
+    if (!ocsp_response_der.empty()) {
+        if (!require_positive_revocation || ocsp_response_der.size() > 64U * 1024U)
+            return false;
+        const CfOwner<CFDataRef> response(CFDataCreate(kCFAllocatorDefault,
+            reinterpret_cast<const UInt8*>(ocsp_response_der.data()),
+            static_cast<CFIndex>(ocsp_response_der.size())));
+        // Opaque signed bytes. Native trust evaluates issuer, certificate ID,
+        // signature, status and freshness; never treat file presence as trust.
+        if (!response.get() ||
+            SecTrustSetOCSPResponse(trust.get(), response.get()) != errSecSuccess)
+            return false;
+    }
+
+    if (!exclusive_root_der.empty()) {
+        if (exclusive_root_der.size() > 64U * 1024U) return false;
+        const CfOwner<CFDataRef> encoded(CFDataCreate(kCFAllocatorDefault,
+            reinterpret_cast<const UInt8*>(exclusive_root_der.data()),
+            static_cast<CFIndex>(exclusive_root_der.size())));
+        const CfOwner<SecCertificateRef> anchor(encoded.get()
+            ? SecCertificateCreateWithData(kCFAllocatorDefault, encoded.get()) : nullptr);
+        if (!anchor.get()) return false;
+        const void* items[]{anchor.get()};
+        const CfOwner<CFArrayRef> anchors(CFArrayCreate(kCFAllocatorDefault,
+            items, 1, &kCFTypeArrayCallBacks));
+        if (!anchors.get() || SecTrustSetAnchorCertificates(trust.get(), anchors.get()) != errSecSuccess ||
+            SecTrustSetAnchorCertificatesOnly(trust.get(), true) != errSecSuccess) return false;
+    }
 
     const CfOwner<CFStringRef> host(peer_is_server ? CFStringCreateWithCString(
         kCFAllocatorDefault, hostname.c_str(), kCFStringEncodingUTF8) : nullptr);
     if (peer_is_server && host.get() == nullptr) return false;
     const CfOwner<SecPolicyRef> tls_policy(SecPolicyCreateSSL(
         peer_is_server, peer_is_server ? host.get() : nullptr));
-    const CfOwner<SecPolicyRef> revocation_policy(SecPolicyCreateRevocation(
-        kSecRevocationUseAnyAvailableMethod));
+    // A best-attempt policy can succeed when revocation status is unavailable.
+    // The dedicated desktop listener must not turn that into revocation_checked
+    // evidence. Legacy transports retain their existing policy until separately
+    // migrated; no compatibility escape hatch exists on the desktop TLS CLI.
+    const CFOptionFlags revocation_flags = kSecRevocationUseAnyAvailableMethod |
+        (require_positive_revocation ? kSecRevocationRequirePositiveResponse : 0);
+    const CfOwner<SecPolicyRef> revocation_policy(SecPolicyCreateRevocation(revocation_flags));
     if (tls_policy.get() == nullptr || revocation_policy.get() == nullptr) {
         return false;
     }
@@ -147,7 +193,7 @@ private:
         &kCFTypeArrayCallBacks));
     if (policies.get() == nullptr ||
         SecTrustSetPolicies(trust.get(), policies.get()) != errSecSuccess ||
-        SecTrustSetNetworkFetchAllowed(trust.get(), true) != errSecSuccess) {
+        SecTrustSetNetworkFetchAllowed(trust.get(), allow_network_fetch && ocsp_response_der.empty()) != errSecSuccess) {
         return false;
     }
     CFErrorRef error{};
@@ -839,5 +885,330 @@ rwn::transport::AuthenticatedConnection NetworkFrameworkServerListener::accept(
 std::uint16_t NetworkFrameworkServerListener::listen_port() const noexcept {
     return impl_ == nullptr ? 0 : impl_->listen_port();
 }
+
+namespace {
+void check_tcp_timeout(std::chrono::milliseconds timeout) {
+    if (timeout.count() <= 0 || timeout > std::chrono::seconds(30))
+        throw std::invalid_argument("TCP timeout outside bounds");
+}
+class AppleTlsByteChannel final : public TlsByteChannel {
+public:
+    AppleTlsByteChannel(nw_connection_t connection, AuthenticatedPeerEvidence peer,
+                        std::chrono::milliseconds timeout)
+        : connection_(connection), peer_(peer) {
+        const auto signal = std::make_shared<StreamSignal>();
+        const auto queue = dispatch_queue_create("lanpilot.tcp.channel", DISPATCH_QUEUE_SERIAL);
+        nw_connection_set_queue(connection_, queue);
+        nw_connection_set_state_changed_handler(connection_, ^(nw_connection_state_t state, nw_error_t error) {
+            std::lock_guard lock(signal->mutex);
+            if (state == nw_connection_state_ready) signal->complete = true;
+            if (state == nw_connection_state_failed || state == nw_connection_state_cancelled) {
+                signal->complete = true;
+                signal->error = error ? network_error_text(error) : "TCP connection cancelled";
+            }
+            signal->condition.notify_all();
+        });
+        nw_connection_start(connection_);
+        try {
+            wait(signal, timeout);
+            const auto metadata = nw_connection_copy_protocol_metadata(connection_, nw_protocol_copy_tls_definition());
+            if (metadata == nullptr) throw std::runtime_error("missing TLS metadata");
+            const auto security = nw_tls_copy_sec_protocol_metadata(metadata);
+            const auto protocol = security ? sec_protocol_metadata_get_negotiated_protocol(security) : nullptr;
+            if (!protocol || std::string_view(protocol) != desktop_tcp_alpn ||
+                sec_protocol_metadata_get_negotiated_tls_protocol_version(security) != tls_protocol_version_TLSv13)
+                throw std::runtime_error("TCP TLS version or ALPN mismatch");
+            validate_authenticated_peer_evidence(peer_);
+        } catch (...) { cancel(); throw; }
+    }
+    ~AppleTlsByteChannel() override { cancel(); }
+    const AuthenticatedPeerEvidence& peer() const noexcept override { return peer_; }
+    void write(std::span<const std::byte> bytes, std::chrono::milliseconds timeout) override {
+        check_tcp_timeout(timeout);
+        if (bytes.empty() || bytes.size() > tls_channel_write_limit)
+            throw std::length_error("TCP write exceeds bounds");
+        std::scoped_lock lock(write_mutex_);
+        require_open();
+        const auto signal = std::make_shared<StreamSignal>();
+        nw_connection_send(connection_, make_dispatch_data(bytes), NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT,
+            true, ^(nw_error_t error) {
+                std::lock_guard guard(signal->mutex);
+                if (error) signal->error = network_error_text(error);
+                signal->complete = true;
+                signal->condition.notify_all();
+            });
+        try { wait(signal, timeout); } catch (...) { cancel(); throw; }
+    }
+    std::vector<std::byte> read_some(std::chrono::milliseconds timeout) override {
+        check_tcp_timeout(timeout);
+        std::scoped_lock lock(read_mutex_);
+        require_open();
+        const auto signal = std::make_shared<StreamSignal>();
+        nw_connection_receive(connection_, 1, static_cast<std::uint32_t>(tls_channel_write_limit),
+            ^(dispatch_data_t data, nw_content_context_t, bool complete, nw_error_t error) {
+                std::lock_guard guard(signal->mutex);
+                try {
+                    if (data && dispatch_data_get_size(data) > tls_channel_write_limit)
+                        throw std::length_error("TCP receive exceeds bounds");
+                    signal->content = copy_dispatch_data(data);
+                    if (error) signal->error = network_error_text(error);
+                    else if (signal->content.empty()) signal->error = complete ? "TCP EOF" : "empty TCP receive";
+                } catch (...) { signal->error = "TCP receive failed"; }
+                signal->complete = true;
+                signal->condition.notify_all();
+            });
+        try { wait(signal, timeout); } catch (...) { cancel(); throw; }
+        return std::move(signal->content);
+    }
+    void cancel() noexcept override {
+        if (!cancelled_.exchange(true)) nw_connection_cancel(connection_);
+    }
+private:
+    static void wait(const std::shared_ptr<StreamSignal>& signal, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(signal->mutex);
+        if (!signal->condition.wait_for(lock, timeout, [&] { return signal->complete; }))
+            throw std::runtime_error("TCP operation timed out");
+        if (!signal->error.empty()) throw std::runtime_error(signal->error);
+    }
+    void require_open() const {
+        if (cancelled_.load()) throw std::runtime_error("TCP channel cancelled");
+    }
+    nw_connection_t connection_;
+    AuthenticatedPeerEvidence peer_;
+    std::atomic<bool> cancelled_{};
+    std::mutex read_mutex_, write_mutex_;
+};
+struct TcpListenerState {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::deque<nw_connection_t> pending;
+    bool closed{};
+};
+}
+
+class DedicatedTlsListener::Impl {
+public:
+    Impl(AppleNetworkServerOptions options, const std::string& address,
+         std::vector<std::byte> exclusive_root_der,
+         std::vector<std::byte> client_ocsp_response_der)
+        : state_(std::make_shared<TcpListenerState>()) {
+        validate_apple_network_server_options(options);
+        if (client_ocsp_response_der.size() > 64U * 1024U ||
+            (!client_ocsp_response_der.empty() && exclusive_root_der.empty()))
+            throw std::invalid_argument("local OCSP response requires bounded data and explicit root");
+        if (!exclusive_root_der.empty()) {
+            if (exclusive_root_der.size() > 64U * 1024U)
+                throw std::invalid_argument("application TLS root exceeds bounds");
+            const CfOwner<CFDataRef> encoded(CFDataCreate(kCFAllocatorDefault,
+                reinterpret_cast<const UInt8*>(exclusive_root_der.data()),
+                static_cast<CFIndex>(exclusive_root_der.size())));
+            const CfOwner<SecCertificateRef> parsed(encoded.get()
+                ? SecCertificateCreateWithData(kCFAllocatorDefault, encoded.get()) : nullptr);
+            if (!parsed.get()) throw std::invalid_argument("invalid application TLS root DER");
+        }
+        // A single allowlisted certificate makes evidence unambiguous. Never
+        // infer which client authenticated from a multi-peer allowlist.
+        peer_ = single_allowed_peer_evidence(options.identity.allowed_peer_certificate_sha256);
+        in_addr ipv4{}; in6_addr ipv6{};
+        if (inet_pton(AF_INET, address.c_str(), &ipv4) != 1 &&
+            inet_pton(AF_INET6, address.c_str(), &ipv6) != 1)
+            throw std::invalid_argument("TCP bind requires explicit numeric address");
+        if (address == "0.0.0.0" || (IN6_IS_ADDR_UNSPECIFIED(&ipv6) && address.find(':') != std::string::npos))
+            throw std::invalid_argument("TCP wildcard bind is disabled");
+        const CfOwner<SecIdentityRef> identity(load_identity(options.identity.keychain_persistent_reference));
+        const auto security_identity = sec_identity_create(identity.get());
+        if (!security_identity) throw std::runtime_error("TCP identity creation failed");
+        const auto verify_queue = dispatch_queue_create("lanpilot.tcp.verify", DISPATCH_QUEUE_SERIAL);
+        const auto allowlist = options.identity.allowed_peer_certificate_sha256;
+        const auto parameters = nw_parameters_create_secure_tcp(^(nw_protocol_options_t tls) {
+            const auto security = nw_tls_copy_sec_protocol_options(tls);
+            sec_protocol_options_set_local_identity(security, security_identity);
+            sec_protocol_options_set_peer_authentication_required(security, true);
+            sec_protocol_options_set_min_tls_protocol_version(security, tls_protocol_version_TLSv13);
+            sec_protocol_options_set_max_tls_protocol_version(security, tls_protocol_version_TLSv13);
+            sec_protocol_options_add_tls_application_protocol(security, "lanpilot/tcp/1");
+            sec_protocol_options_set_tls_resumption_enabled(security, false);
+            sec_protocol_options_set_tls_tickets_enabled(security, false);
+            sec_protocol_options_set_verify_block(security,
+                ^(sec_protocol_metadata_t, sec_trust_t trust, sec_protocol_verify_complete_t complete) {
+                    bool accepted = false;
+                    try { accepted = verify_peer(trust, false, {}, allowlist,
+                        exclusive_root_der, true, client_ocsp_response_der); } catch (...) {}
+                    complete(accepted);
+                }, verify_queue);
+        }, ^(nw_protocol_options_t tcp) { nw_tcp_options_set_no_delay(tcp, true); });
+        if (!parameters) throw std::runtime_error("TCP parameters failed");
+        // A bounded test/service restart must not wait for the previous TCP
+        // connections' TIME_WAIT. The bind remains this explicit local address.
+        nw_parameters_set_reuse_local_address(parameters, true);
+        const auto port = std::to_string(options.listen_port);
+        nw_parameters_set_local_endpoint(parameters, nw_endpoint_create_host(address.c_str(), port.c_str()));
+        listener_ = nw_listener_create(parameters);
+        if (!listener_) throw std::runtime_error("TCP listener failed");
+        const auto queue = dispatch_queue_create("lanpilot.tcp.listener", DISPATCH_QUEUE_SERIAL);
+        nw_listener_set_queue(listener_, queue);
+        const auto state = state_;
+        const auto limit = options.maximum_pending_connections;
+        nw_listener_set_new_connection_limit(listener_, static_cast<std::uint32_t>(limit));
+        nw_listener_set_state_changed_handler(listener_, ^(nw_listener_state_t status, nw_error_t) {
+            std::lock_guard lock(state->mutex);
+            if (status == nw_listener_state_failed || status == nw_listener_state_cancelled) state->closed = true;
+            state->condition.notify_all();
+        });
+        nw_listener_set_new_connection_handler(listener_, ^(nw_connection_t connection) {
+            std::lock_guard lock(state->mutex);
+            if (state->closed || state->pending.size() >= limit) { nw_connection_cancel(connection); return; }
+            state->pending.push_back(connection);
+            state->condition.notify_all();
+        });
+        nw_listener_start(listener_);
+    }
+    ~Impl() { cancel(); }
+    void cancel() noexcept {
+        std::lock_guard lock(state_->mutex);
+        // Failure may already have set closed; still release pending sockets.
+        state_->closed = true;
+        for (auto connection : state_->pending) nw_connection_cancel(connection);
+        state_->pending.clear();
+        state_->condition.notify_all();
+        nw_listener_cancel(listener_);
+    }
+    std::unique_ptr<TlsByteChannel> try_accept(std::chrono::milliseconds idle_timeout,
+                                              std::chrono::milliseconds handshake_timeout) {
+        check_tcp_timeout(idle_timeout);
+        check_tcp_timeout(handshake_timeout);
+        nw_connection_t connection{};
+        {
+            std::unique_lock lock(state_->mutex);
+            if (!state_->condition.wait_for(lock, idle_timeout,
+                    [&] { return state_->closed || !state_->pending.empty(); }))
+                return nullptr;
+            if (state_->closed) throw std::runtime_error("TCP listener closed");
+            connection = state_->pending.front();
+            state_->pending.pop_front();
+        }
+        return std::make_unique<AppleTlsByteChannel>(connection, peer_, handshake_timeout);
+    }
+    std::unique_ptr<TlsByteChannel> accept(std::chrono::milliseconds timeout) {
+        check_tcp_timeout(timeout);
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        nw_connection_t connection{};
+        {
+            std::unique_lock lock(state_->mutex);
+            if (!state_->condition.wait_until(lock, deadline, [&] { return state_->closed || !state_->pending.empty(); }))
+                throw std::runtime_error("TCP accept timeout");
+            if (state_->closed) throw std::runtime_error("TCP listener closed");
+            connection = state_->pending.front(); state_->pending.pop_front();
+        }
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) { nw_connection_cancel(connection); throw std::runtime_error("TCP handshake timeout"); }
+        return std::make_unique<AppleTlsByteChannel>(connection, peer_, remaining);
+    }
+    std::uint16_t port() const noexcept { return nw_listener_get_port(listener_); }
+private:
+    nw_listener_t listener_{};
+    std::shared_ptr<TcpListenerState> state_;
+    AuthenticatedPeerEvidence peer_{};
+};
+DedicatedTlsListener::DedicatedTlsListener(AppleNetworkServerOptions options, std::string address,
+                                         std::vector<std::byte> exclusive_root_der,
+                                         std::vector<std::byte> client_ocsp_response_der)
+    : impl_(std::make_unique<Impl>(std::move(options), address,
+          std::move(exclusive_root_der), std::move(client_ocsp_response_der))) {}
+DedicatedTlsListener::~DedicatedTlsListener() = default;
+void verify_local_tls_identity(const std::vector<std::byte>& reference,
+                               const bool allow_user_interaction) {
+    if (reference.empty() || reference.size() > 4096)
+        throw std::invalid_argument("local TLS identity reference outside bounds");
+    // Legacy Keychain interaction is process-wide. This API is intentionally
+    // restricted to the standalone setup CLI, never the streaming runtime.
+    struct InteractionScope {
+        Boolean previous{};
+        explicit InteractionScope(const bool allowed) {
+            if (SecKeychainGetUserInteractionAllowed(&previous) != errSecSuccess ||
+                SecKeychainSetUserInteractionAllowed(allowed) != errSecSuccess)
+                throw std::runtime_error("cannot set local Keychain interaction policy");
+        }
+        ~InteractionScope() { (void)SecKeychainSetUserInteractionAllowed(previous); }
+    } interaction(allow_user_interaction);
+    const CfOwner<SecIdentityRef> identity(load_identity(reference));
+    SecKeyRef raw_key{};
+    const auto key_status = SecIdentityCopyPrivateKey(identity.get(), &raw_key);
+    const CfOwner<SecKeyRef> key(raw_key);
+    if (key_status != errSecSuccess || !key.get())
+        throw std::runtime_error("local TLS key unavailable; OSStatus=" + std::to_string(key_status));
+    SecCertificateRef raw_certificate{};
+    const auto certificate_status = SecIdentityCopyCertificate(identity.get(), &raw_certificate);
+    const CfOwner<SecCertificateRef> certificate(raw_certificate);
+    if (certificate_status != errSecSuccess || !certificate.get())
+        throw std::runtime_error("local TLS identity certificate unavailable");
+    const CfOwner<SecKeyRef> public_key(SecCertificateCopyKey(certificate.get()));
+    if (!public_key.get()) throw std::runtime_error("local TLS certificate public key unavailable");
+    // Select from PUBLIC certificate capability. A legacy/inaccessible private
+    // key can report false before giving us its actual signing/access error.
+    const auto algorithm = SecKeyIsAlgorithmSupported(public_key.get(), kSecKeyOperationTypeVerify,
+        kSecKeyAlgorithmRSASignatureMessagePSSSHA256)
+        ? kSecKeyAlgorithmRSASignatureMessagePSSSHA256
+        : kSecKeyAlgorithmECDSASignatureMessageX962SHA256;
+    if (!SecKeyIsAlgorithmSupported(public_key.get(), kSecKeyOperationTypeVerify, algorithm))
+        throw std::runtime_error("local TLS certificate algorithm unsupported");
+    std::array<std::uint8_t, 64> challenge{};
+    constexpr char domain[] = "LanPilot TLS identity check v1";
+    static_assert(sizeof(domain) <= 32);
+    std::memcpy(challenge.data(), domain, sizeof(domain));
+    if (SecRandomCopyBytes(kSecRandomDefault, 32, challenge.data()+32) != errSecSuccess)
+        throw std::runtime_error("local TLS challenge generation failed");
+    const CfOwner<CFDataRef> message(CFDataCreate(kCFAllocatorDefault, challenge.data(), challenge.size()));
+    if (!message.get()) throw std::runtime_error("local TLS challenge allocation failed");
+    CFErrorRef raw_error{};
+    const CfOwner<CFDataRef> signature(SecKeyCreateSignature(key.get(), algorithm, message.get(), &raw_error));
+    const CfOwner<CFErrorRef> signing_error(raw_error);
+    if (!signature.get())
+        throw std::runtime_error("local TLS signing not ready; Keychain approval may be required; code=" +
+            std::to_string(signing_error.get() ? CFErrorGetCode(signing_error.get()) : 0));
+    raw_error = nullptr;
+    const bool verified = SecKeyVerifySignature(public_key.get(), algorithm, message.get(), signature.get(), &raw_error);
+    const CfOwner<CFErrorRef> verification_error(raw_error);
+    if (!verified) throw std::runtime_error("local TLS identity possession verification failed");
+}
+
+bool probe_desktop_client_trust(const std::vector<std::byte>& certificate_der,
+    const std::vector<std::byte>& root_der, const std::vector<std::byte>& ocsp_der,
+    std::int64_t verify_unix_seconds) {
+    if (certificate_der.empty() || certificate_der.size() > 65536 ||
+        root_der.empty() || root_der.size() > 65536 || ocsp_der.size() > 65536 ||
+        (verify_unix_seconds != 0 &&
+         (verify_unix_seconds < 946684800 || verify_unix_seconds > 4102444800)))
+        throw std::invalid_argument("trust probe inputs outside bounds");
+    const CfOwner<CFDataRef> data(CFDataCreate(kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(certificate_der.data()),
+        static_cast<CFIndex>(certificate_der.size())));
+    const CfOwner<SecCertificateRef> certificate(data.get()
+        ? SecCertificateCreateWithData(kCFAllocatorDefault, data.get()) : nullptr);
+    const CfOwner<SecPolicyRef> policy(SecPolicyCreateSSL(false, nullptr));
+    if (!certificate.get() || !policy.get())
+        throw std::invalid_argument("invalid trust probe certificate");
+    SecTrustRef raw_trust{};
+    if (SecTrustCreateWithCertificates(certificate.get(), policy.get(), &raw_trust) != errSecSuccess)
+        throw std::runtime_error("trust probe creation failed");
+    const CfOwner<SecTrustRef> trust(raw_trust);
+    if (verify_unix_seconds) {
+        const CfOwner<CFDateRef> date(CFDateCreate(kCFAllocatorDefault,
+            static_cast<CFAbsoluteTime>(verify_unix_seconds) - kCFAbsoluteTimeIntervalSince1970));
+        if (!date.get() || SecTrustSetVerifyDate(trust.get(), date.get()) != errSecSuccess)
+            throw std::runtime_error("trust probe date failed");
+    }
+    const auto wrapped = sec_trust_create(trust.get());
+    if (!wrapped) throw std::runtime_error("trust probe wrapper failed");
+    return verify_peer(wrapped, false, {}, {leaf_fingerprint(trust.get())},
+        root_der, true, ocsp_der, false);
+}
+std::unique_ptr<TlsByteChannel> DedicatedTlsListener::accept(std::chrono::milliseconds timeout) { return impl_->accept(timeout); }
+std::unique_ptr<TlsByteChannel> DedicatedTlsListener::try_accept(
+    std::chrono::milliseconds idle_timeout, std::chrono::milliseconds handshake_timeout) {
+    return impl_->try_accept(idle_timeout, handshake_timeout);
+}
+void DedicatedTlsListener::cancel() noexcept { impl_->cancel(); }
+std::uint16_t DedicatedTlsListener::listen_port() const noexcept { return impl_->port(); }
 
 }  // namespace rwn::platform::macos

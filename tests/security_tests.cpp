@@ -4059,6 +4059,11 @@ void msquic_provider_rejects_implicit_runtime_and_invalid_identity() {
 #if defined(RWN_TEST_WINDOWS_PLATFORM)
 void schannel_fallback_rejects_implicit_or_unbounded_identity() {
     using rwn::platform::windows::SchannelFallbackClientOptions;
+    // Configuration must fail before certificate-store lookup or network IO.
+    rwn::test::require_throws<std::invalid_argument>([] {
+        static_cast<void>(rwn::platform::windows::connect_dedicated_tls_channel(
+            {}, {"127.0.0.1", 1, rwn::transport::NetworkPath::lan}));
+    }, "dedicated TLS requires explicit paired identities");
     const auto client =
         rwn::platform::windows::parse_schannel_sha1_thumbprint(
             "00112233445566778899AABBCCDDEEFF10203040");
@@ -4070,6 +4075,14 @@ void schannel_fallback_rejects_implicit_or_unbounded_identity() {
         .client_certificate_sha1 = client,
         .allowed_server_certificate_sha256 = {server},
     };
+
+    for (const auto size : {1U, 65537U}) {
+        auto invalid_root = valid;
+        invalid_root.exclusive_root_der.assign(size, std::byte{0});
+        rwn::test::require_throws<std::invalid_argument>([&] {
+            rwn::platform::windows::validate_schannel_fallback_client_options(invalid_root);
+        }, "application TLS root rejects malformed and oversized DER");
+    }
 
     rwn::test::require_throws<std::invalid_argument>(
         [] {
@@ -4460,8 +4473,11 @@ void exact_only_mode_rejects_lossy_and_unimplemented_representations() {
 
 }  // namespace
 
+#include "channel_session_tests.hpp"
+
 int main() {
     rwn::test::Runner runner;
+    runner.run("TCP channels reject untrusted cross-session and duplicate bindings", channel_tests::security);
     runner.run("build and artifact wire rejects forged evidence", build_and_artifact_wire_rejects_forged_evidence);
     runner.run("workspace control wire rejects unsafe transactions", workspace_control_wire_rejects_unsafe_transactions);
     runner.run("build service rejects scope revision and forged reply", build_service_rejects_scope_revision_and_forged_reply);

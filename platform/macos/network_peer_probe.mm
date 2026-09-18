@@ -1,4 +1,5 @@
 #include "rwn/platform/macos/network_transport.hpp"
+#include "rwn/platform/macos/tcp_listener.hpp"
 
 #include "rwn/core/content_hash.hpp"
 
@@ -12,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <span>
@@ -257,6 +260,7 @@ void usage() {
     std::cerr
         << "usage:\n"
            "  rwn-network-peer-probe identity-ref <certificate-sha256>\n"
+           "  rwn-network-peer-probe client-trust <leaf.der> <root.der> <ocsp.der|-> <unix-time|0>\n"
            "  rwn-network-peer-probe server <persistent-ref-hex> "
            "<allowed-client-cert-sha256> <port>\n"
            "  rwn-network-peer-probe client <persistent-ref-hex> "
@@ -268,6 +272,31 @@ void usage() {
 int main(const int argc, char** argv) {
     try {
         const auto role = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+        if (role == "client-trust" && argc == 6) {
+            const auto read = [](const std::filesystem::path& path) {
+                if (!path.is_absolute() || !std::filesystem::is_regular_file(path))
+                    throw std::invalid_argument("trust probe needs absolute regular files");
+                const auto size = std::filesystem::file_size(path);
+                if (!size || size > 65536) throw std::invalid_argument("trust probe file outside bounds");
+                std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+                std::ifstream stream(path, std::ios::binary);
+                if (!stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size)) ||
+                    stream.peek() != std::char_traits<char>::eof())
+                    throw std::runtime_error("trust probe file read failed");
+                return bytes;
+            };
+            const std::string_view date(argv[5]);
+            std::int64_t seconds{};
+            const auto [end, error] = std::from_chars(date.data(), date.data()+date.size(), seconds);
+            if (error != std::errc{} || end != date.data()+date.size())
+                throw std::invalid_argument("trust probe date invalid");
+            const auto accepted = rwn::platform::macos::probe_desktop_client_trust(
+                read(argv[2]), read(argv[3]), std::string_view(argv[4]) == "-"
+                    ? std::vector<std::byte>{} : read(argv[4]), seconds);
+            std::cout << "desktop_client_trust=" << (accepted ? "accepted" : "rejected")
+                      << " network_fetch=0 keychain_write=0\n";
+            return accepted ? 0 : 3;
+        }
         if (role == "identity-ref" && argc == 3) {
             return print_identity_reference(argv[2]);
         }

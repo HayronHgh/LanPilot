@@ -1,6 +1,7 @@
 add_library(rwn_transport
   src/apple_network_contract.cpp
   src/certificate_identity.cpp
+  src/channel_session.cpp
   src/encrypted_fallback.cpp
   src/resilient_transport.cpp
   src/verification.cpp

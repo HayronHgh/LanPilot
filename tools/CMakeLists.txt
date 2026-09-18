@@ -1,4 +1,13 @@
 if(WIN32 OR APPLE)
+  add_executable(rwn-dedicated-tls-probe dedicated_tls_probe.cpp)
+  if(WIN32)
+    add_executable(rwn-desktop-control-security-probe desktop_control_security_probe.cpp)
+    target_link_libraries(rwn-desktop-control-security-probe PRIVATE
+      rwn::desktop rwn::platform_windows rwn_project_options)
+    target_link_libraries(rwn-dedicated-tls-probe PRIVATE rwn::platform_windows rwn_project_options)
+  else()
+    target_link_libraries(rwn-dedicated-tls-probe PRIVATE rwn::platform_macos rwn_project_options)
+  endif()
   add_executable(rwn-diagnostics diagnostics_main.cpp)
   target_link_libraries(rwn-diagnostics PRIVATE rwn::core rwn_project_options)
   target_compile_definitions(rwn-diagnostics PRIVATE

@@ -34,6 +34,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <functional>
+#include "tls_preview.hpp"
 
 namespace {
 
@@ -168,7 +170,8 @@ int stream_h264_stdio(
     const bool interactive,
     const bool raw_rect_experimental,
     const bool h264_only_explicit,
-    const bool exact_only) {
+    const bool exact_only,
+    const std::function<void()>& cancel_network = {}) {
 #if defined(__APPLE__)
     const auto vt_mode = parse_vt_mode(vt_mode_value);
     rwn::platform::macos::MacosDesktopPermissionBackend permissions;
@@ -213,7 +216,7 @@ int stream_h264_stdio(
     rwn::platform::macos::MacosScreenCaptureBackend capture(
         maximum_width, maximum_height, frames_per_second,
         lifecycle.get(), !independent_cursor,
-        dirty_analysis || (visual_protocol && interactive && !h264_only_explicit));
+        dirty_analysis || (visual_protocol && (interactive || cancel_network) && !h264_only_explicit));
     std::mutex diagnostics_mutex;
     std::atomic_bool stop_trace_writer{};
     std::thread trace_writer;
@@ -276,7 +279,7 @@ int stream_h264_stdio(
     std::unique_ptr<rwn::desktop::InputReceiver> input_receiver;
     std::atomic_bool control_disconnected{};
     std::thread input_worker;
-    if (interactive) {
+    if (interactive || cancel_network) {
         input_backend =
             std::make_unique<rwn::platform::macos::MacosInputBackend>();
         input_receiver =
@@ -286,7 +289,9 @@ int stream_h264_stdio(
                 const rwn::core::AuthorizationResult authorization{
                     .principal_matched = true,
                     .workspace_allowed = true,
-                    .granted = {rwn::core::Capability::desktop_control},
+                    .granted = interactive
+                        ? std::set{rwn::core::Capability::desktop_control}
+                        : std::set<rwn::core::Capability>{},
                     .denied = {},
                 };
                 std::uint64_t last_sequence{};
@@ -309,6 +314,9 @@ int stream_h264_stdio(
                     const auto bytes_received_at_us = monotonic_timestamp_us();
                     rwn::desktop::validate_reverse_control_payload(
                         header, payload);
+                    if (!interactive && (header.type == rwn::desktop::ReverseControlType::input_event ||
+                        header.type == rwn::desktop::ReverseControlType::release_all_input))
+                        throw std::invalid_argument("view-only TLS session forbids input");
                     const auto release_all = header.type ==
                         rwn::desktop::ReverseControlType::release_all_input;
                     std::optional<rwn::desktop::InputEvent> input_event;
@@ -379,6 +387,8 @@ int stream_h264_stdio(
                                 monotonic_timestamp_us());
                             break;
                         case rwn::desktop::ReverseControlType::ping:
+                            if (cancel_network) break; // TLS keepalive must not request a snapshot.
+                            [[fallthrough]];
                         case rwn::desktop::ReverseControlType::
                                 request_full_snapshot:
                             snapshot_recovery_requested.store(
@@ -422,11 +432,13 @@ int stream_h264_stdio(
                 // EOF ends an interactive session even on a static desktop:
                 // no future encoded frame may arrive to discover broken stdout.
                 control_disconnected.store(true, std::memory_order_release);
+                if (cancel_network) cancel_network();
             } catch (...) {
                 static_cast<void>(input_receiver->release_all_input());
                 std::lock_guard lock(worker_error_mutex);
                 worker_error = std::current_exception();
                 control_disconnected.store(true, std::memory_order_release);
+                if (cancel_network) cancel_network();
             }
         });
     }
@@ -563,7 +575,7 @@ int stream_h264_stdio(
     std::atomic_bool stop_dirty_worker{};
     std::thread dirty_worker;
     const bool snapshot_enabled =
-        visual_protocol && interactive && !h264_only_explicit;
+        visual_protocol && (interactive || cancel_network) && !h264_only_explicit;
     std::unique_ptr<
         rwn::platform::macos::MacosMetalDirtyTileAnalyzer> exact_analyzer;
     if (dirty_analysis || snapshot_enabled) {
@@ -1930,7 +1942,8 @@ int stream_h264_stdio(
         trace_writer.join();
     }
     if (input_worker.joinable()) {
-        ::close(STDIN_FILENO);
+        if (cancel_network) cancel_network();
+        else ::close(STDIN_FILENO);
         input_worker.join();
     }
     return 0;
@@ -1947,6 +1960,7 @@ int stream_h264_stdio(
     static_cast<void>(raw_rect_experimental);
     static_cast<void>(h264_only_explicit);
     static_cast<void>(exact_only);
+    static_cast<void>(cancel_network);
     std::cerr << "H.264 preview server is supported only on macOS\n";
     return 2;
 #endif
@@ -2140,6 +2154,45 @@ int main(const int argc, char** argv) {
         rwn::platform::macos::require_process_identity(
             rwn::core::ProcessRole::desktop_agent);
 #endif
+        if (argc == 3 && (std::string_view(argv[1]) == "--check-tls-identity" ||
+                          std::string_view(argv[1]) == "--authorize-tls-identity")) {
+#if defined(__APPLE__)
+            const bool interactive = std::string_view(argv[1]) == "--authorize-tls-identity";
+            if (interactive)
+                std::cerr << "Approve this LanPilot agent in the native Keychain dialog, or cancel. No network listener is running.\n";
+            rwn::platform::macos::verify_local_tls_identity(
+                rwn::preview::TlsPreviewSession::identity(argv[2]), interactive);
+            std::cout << "local_tls_identity_signing=ready private_export=0 peer_authenticated=0 listener_started=0\n";
+            return 0;
+#else
+            throw std::invalid_argument("local TLS identity setup requires macOS");
+#endif
+        }
+        if ((argc == 9 || argc == 10) && std::string_view(argv[1]) == "--stream-visual-tls") {
+#if defined(__APPLE__)
+            const std::string_view control = argv[7];
+            const std::string_view mode = argv[8];
+            if ((control != "view-only" && control != "interactive") ||
+                (mode != "h264-only" && mode != "exact-only"))
+                throw std::invalid_argument("invalid TLS desktop mode");
+            rwn::transport::AppleNetworkServerOptions options;
+            options.listen_port = static_cast<std::uint16_t>(parse_u32(argv[3],1,65535,"TLS port"));
+            options.maximum_pending_connections = 2;
+            options.identity.keychain_persistent_reference = rwn::preview::TlsPreviewSession::identity(argv[4]);
+            options.identity.allowed_peer_certificate_sha256 = {
+                rwn::transport::parse_apple_network_sha256_fingerprint(argv[5])};
+            rwn::preview::TlsPreviewSession network(options,argv[2],
+                rwn::preview::TlsPreviewSession::read_root(argv[6]),control == "interactive",
+                argc == 10 ? rwn::preview::TlsPreviewSession::read_root(argv[9])
+                           : std::vector<std::byte>{});
+            std::cerr << "RWN_TRANSPORT visual=tls control=tls agent=ssh session_ttl_s=1800 control_idle_timeout_s=30\n";
+            return stream_h264_stdio(1920,1080,60,20000,"baseline",true,false,false,
+                control == "interactive",mode == "exact-only",mode == "h264-only",mode == "exact-only",
+                [&] { network.cancel(); });
+#else
+            throw std::invalid_argument("TLS desktop server requires macOS");
+#endif
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--probe-desktop") {
             return probe_desktop_runtime();
         }

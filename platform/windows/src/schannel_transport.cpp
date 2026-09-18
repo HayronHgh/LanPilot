@@ -23,6 +23,7 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -466,7 +467,7 @@ public:
         const SchannelFallbackClientOptions& options,
         const TransportEndpoint& endpoint,
         const QuicTransportSettings& settings,
-        const bool datagram)
+        const bool datagram, const bool dedicated_tcp = false)
         : options_(options), endpoint_(endpoint), settings_(settings),
           datagram_(datagram), target_name_(utf8_to_wide(endpoint.host)) {
         open_certificate();
@@ -475,6 +476,7 @@ public:
             endpoint_, datagram_ ? SOCK_DGRAM : SOCK_STREAM,
             datagram_ ? IPPROTO_UDP : IPPROTO_TCP,
             options_.connect_timeout);
+        if (dedicated_tcp) configure_dedicated_tcp();
         handshake();
         validate_context();
         query_sizes();
@@ -602,6 +604,36 @@ public:
         return sizes_.cbMaximumMessage;
     }
 
+    bool wait_readable(const std::chrono::milliseconds timeout) {
+        if (datagram_) throw std::logic_error("idle readiness requires TCP");
+        static_cast<void>(deadline_after(timeout));
+        if (!encrypted_pending_.empty()) return true;
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(timeout);
+        timeval interval{static_cast<long>(us.count()/1'000'000),
+                         static_cast<long>(us.count()%1'000'000)};
+        fd_set reads;
+        FD_ZERO(&reads);
+        FD_SET(socket_.get(), &reads);
+        const auto status = select(0, &reads, nullptr, nullptr, &interval);
+        if (status == SOCKET_ERROR) fail_winsock("Schannel idle readiness");
+        return status != 0;
+    }
+
+    void configure_dedicated_tcp() {
+        if (datagram_) throw std::logic_error("dedicated channel requires TCP");
+        const BOOL enabled = TRUE;
+        if (setsockopt(socket_.get(), IPPROTO_TCP, TCP_NODELAY,
+                       reinterpret_cast<const char*>(&enabled), sizeof(enabled)) != 0)
+            fail_winsock("dedicated TCP_NODELAY");
+        // select deadlines cannot bound a subsequent blocking send. Dedicated
+        // channels fail closed on would-block races instead of hanging a worker.
+        u_long nonblocking = 1;
+        if (ioctlsocket(socket_.get(), FIONBIO, &nonblocking) != 0)
+            fail_winsock("dedicated TCP nonblocking");
+    }
+
+    void cancel_io() noexcept { static_cast<void>(shutdown(socket_.get(), SD_BOTH)); }
+
 private:
     void open_certificate() {
         if (options_.certificate_store_name != L"MY") {
@@ -644,7 +676,8 @@ private:
         credentials.cCreds = 1;
         credentials.paCred = &certificate;
         credentials.dwFlags =
-            SCH_CRED_AUTO_CRED_VALIDATION |
+            (options_.exclusive_root_der.empty() ? SCH_CRED_AUTO_CRED_VALIDATION
+                                                 : SCH_CRED_MANUAL_CRED_VALIDATION) |
             SCH_CRED_NO_DEFAULT_CREDS |
             SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
             SCH_USE_STRONG_CRYPTO;
@@ -676,7 +709,8 @@ private:
             ISC_REQ_REPLAY_DETECT |
             ISC_REQ_CONFIDENTIALITY |
             ISC_REQ_INTEGRITY |
-            ISC_REQ_MUTUAL_AUTH |
+            (options_.exclusive_root_der.empty() ? ISC_REQ_MUTUAL_AUTH
+                                                 : ISC_REQ_MANUAL_CRED_VALIDATION) |
             ISC_REQ_EXTENDED_ERROR |
             ISC_REQ_ALLOCATE_MEMORY |
             ISC_REQ_USE_SUPPLIED_CREDS |
@@ -755,9 +789,15 @@ private:
             }
             if (status != SEC_I_CONTINUE_NEEDED &&
                 status != SEC_I_COMPLETE_AND_CONTINUE) {
-                fail_status("Schannel handshake", status);
+                throw std::runtime_error("Schannel handshake failed; leg=" +
+                    std::to_string(leg) + "; input_bytes=" +
+                    std::to_string(incoming.size()) + "; status=" +
+                    std::to_string(status));
             }
             preserve_handshake_extra(incoming, input_buffers, first);
+            // Only SECBUFFER_EXTRA belongs to the next handshake leg. Replaying
+            // consumed records feeds Schannel the previous flight twice.
+            incoming = std::move(encrypted_pending_);
             first = false;
             if (datagram_) {
                 incoming = receive_udp(socket_.get(), deadline);
@@ -816,12 +856,17 @@ private:
     void validate_context() {
         const ULONG required =
             ISC_RET_CONFIDENTIALITY |
-            ISC_RET_INTEGRITY |
-            ISC_RET_MUTUAL_AUTH |
+            (datagram_ ? ISC_RET_INTEGRITY : 0UL) |
+            // With application-owned roots Schannel cannot assert its automatic
+            // trust policy. Below we require the actual local certificate and
+            // validate the remote chain, name, revocation and paired fingerprint.
+            (options_.exclusive_root_der.empty() ? ISC_RET_MUTUAL_AUTH : 0UL) |
             (datagram_ ? ISC_RET_DATAGRAM : ISC_RET_STREAM);
         if ((returned_attributes_ & required) != required) {
             throw std::runtime_error(
-                "Schannel context is missing required attributes");
+                "Schannel context is missing required attributes; got=" +
+                std::to_string(returned_attributes_) + "; required=" +
+                std::to_string(required));
         }
         SecPkgContext_ConnectionInfo connection{};
         auto status = QueryContextAttributesW(
@@ -837,6 +882,16 @@ private:
                 "Schannel negotiated protocol or cipher is invalid");
         }
         SecPkgContext_ApplicationProtocol application{};
+        if (!datagram_) {
+            // TLS 1.3 stream integrity is supplied by AEAD; Schannel does not
+            // return the standalone SSPI signing attribute on this path.
+            SecPkgContext_CipherInfo cipher{};
+            status = QueryContextAttributesW(context_.get(), SECPKG_ATTR_CIPHER_INFO, &cipher);
+            if (status != SEC_E_OK) fail_status("Schannel cipher query", status);
+            if (cipher.dwCipherSuite != 0x1301 && cipher.dwCipherSuite != 0x1302 &&
+                cipher.dwCipherSuite != 0x1303)
+                throw std::runtime_error("Schannel TLS 1.3 AEAD suite required");
+        }
         status = QueryContextAttributesW(
             context_.get(), SECPKG_ATTR_APPLICATION_PROTOCOL, &application);
         if (status != SEC_E_OK) {
@@ -907,11 +962,39 @@ private:
     }
 
     void validate_chain(const PCCERT_CONTEXT remote) {
+        // Application-only trust engine. Manual Schannel validation is used
+        // only because the platform default engine cannot see this root.
+        // Full SSL hostname/policy/revocation checks below remain mandatory.
+        StoreHandle roots;
+        struct EngineOwner {
+            HCERTCHAINENGINE value{};
+            ~EngineOwner() { if (value) CertFreeCertificateChainEngine(value); }
+        } engine;
+        if (!options_.exclusive_root_der.empty()) {
+            roots.value_ = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
+                CERT_STORE_CREATE_NEW_FLAG, nullptr);
+            if (!roots.value_ || !CertAddEncodedCertificateToStore(roots.value_,
+                    X509_ASN_ENCODING, reinterpret_cast<const BYTE*>(options_.exclusive_root_der.data()),
+                    static_cast<DWORD>(options_.exclusive_root_der.size()),
+                    CERT_STORE_ADD_NEW, nullptr))
+                throw std::runtime_error("application TLS trust root rejected");
+            CERT_CHAIN_ENGINE_CONFIG config{};
+            if (!options_.exclusive_crl_der.empty() && !CertAddEncodedCRLToStore(
+                    roots.value_, X509_ASN_ENCODING,
+                    reinterpret_cast<const BYTE*>(options_.exclusive_crl_der.data()),
+                    static_cast<DWORD>(options_.exclusive_crl_der.size()), CERT_STORE_ADD_NEW, nullptr))
+                throw std::runtime_error("application TLS revocation list rejected");
+            config.cbSize = sizeof(config);
+            config.hExclusiveRoot = roots.value_;
+            config.dwUrlRetrievalTimeout = 5000;
+            if (!CertCreateCertificateChainEngine(&config, &engine.value))
+                throw std::runtime_error("application TLS chain engine failed");
+        }
         CERT_CHAIN_PARA chain_parameters{};
         chain_parameters.cbSize = sizeof(chain_parameters);
         PCCERT_CHAIN_CONTEXT chain{};
         if (!CertGetCertificateChain(
-                nullptr, remote, nullptr, remote->hCertStore,
+                engine.value, remote, nullptr, remote->hCertStore,
                 &chain_parameters,
                 CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
                 nullptr, &chain) || chain == nullptr) {
@@ -1397,6 +1480,17 @@ private:
 
 void validate_schannel_fallback_client_options(
     const SchannelFallbackClientOptions& options) {
+    if (!options.exclusive_crl_der.empty() &&
+        (options.exclusive_root_der.empty() || options.exclusive_crl_der.size() > 64U*1024U))
+        throw std::invalid_argument("application TLS CRL requires bounded data and root");
+    if (!options.exclusive_root_der.empty()) {
+        if (options.exclusive_root_der.size() > 64U * 1024U)
+            throw std::invalid_argument("application TLS trust root exceeds bounds");
+        const CertificateHandle parsed{CertCreateCertificateContext(X509_ASN_ENCODING,
+            reinterpret_cast<const BYTE*>(options.exclusive_root_der.data()),
+            static_cast<DWORD>(options.exclusive_root_der.size()))};
+        if (!parsed.value_) throw std::invalid_argument("invalid application TLS trust root DER");
+    }
     if (all_zero(options.client_certificate_sha1) ||
         options.allowed_server_certificate_sha256.empty() ||
         options.allowed_server_certificate_sha256.size() > 64U ||
@@ -1551,6 +1645,86 @@ SchannelFallbackClientProvider::connect_dtls12(
     const TransportEndpoint& endpoint,
     const QuicTransportSettings& settings) {
     return impl_->connect_dtls12(endpoint, settings);
+}
+
+namespace {
+class DedicatedSchannelChannel final : public rwn::transport::TlsByteChannel {
+public:
+    DedicatedSchannelChannel(const SchannelFallbackClientOptions& options,
+                            const TransportEndpoint& endpoint) {
+        QuicTransportSettings settings;
+        settings.alpn = std::string(rwn::transport::desktop_tcp_alpn);
+        native_ = std::make_unique<NativeClientChannel>(options, endpoint, settings, false, true);
+        const auto& verified = native_->evidence();
+        peer_ = {verified.peer_certificate_sha256,
+                 verified.protocol == EncryptedPlaneProtocol::tls13,
+                 verified.chain_validated, verified.revocation_checked};
+        rwn::transport::validate_authenticated_peer_evidence(peer_);
+    }
+    ~DedicatedSchannelChannel() override { cancel(); }
+    const rwn::transport::AuthenticatedPeerEvidence& peer() const noexcept override { return peer_; }
+    void write(std::span<const std::byte> bytes, std::chrono::milliseconds timeout) override {
+        if (bytes.empty() || bytes.size() > rwn::transport::tls_channel_write_limit)
+            throw std::length_error("dedicated TLS write exceeds bounds");
+        validate_timeout(timeout);
+        // Distinct locks: a blocked receive must never hold up outbound input.
+        std::scoped_lock lock(write_mutex_);
+        require_open();
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        try {
+            while (!bytes.empty()) {
+                const auto size = std::min(bytes.size(), native_->maximum_plaintext());
+                const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0) throw std::runtime_error("dedicated TLS write timeout");
+                native_->send_plain({reinterpret_cast<const std::uint8_t*>(bytes.data()), size}, remaining);
+                bytes = bytes.subspan(size);
+            }
+        } catch (...) { cancel(); throw; }
+    }
+    std::vector<std::byte> read_some(std::chrono::milliseconds timeout) override {
+        validate_timeout(timeout);
+        std::scoped_lock lock(read_mutex_);
+        require_open();
+        try {
+            const auto bytes = native_->receive_plain(timeout);
+            if (bytes.empty() || bytes.size() > rwn::transport::tls_channel_write_limit)
+                throw std::length_error("dedicated TLS read exceeds bounds");
+            std::vector<std::byte> result(bytes.size());
+            std::memcpy(result.data(), bytes.data(), bytes.size());
+            return result;
+        } catch (...) { cancel(); throw; }
+    }
+    bool wait_readable(std::chrono::milliseconds timeout) override {
+        validate_timeout(timeout);
+        std::scoped_lock lock(read_mutex_);
+        require_open();
+        try { return native_->wait_readable(timeout); }
+        catch (...) { cancel(); throw; }
+    }
+    void cancel() noexcept override {
+        if (!cancelled_.exchange(true) && native_) native_->cancel_io();
+    }
+private:
+    static void validate_timeout(std::chrono::milliseconds timeout) {
+        if (timeout.count() <= 0 || timeout > std::chrono::seconds(30))
+            throw std::invalid_argument("dedicated TLS IO timeout outside bounds");
+    }
+    void require_open() const {
+        if (cancelled_.load()) throw std::runtime_error("dedicated TLS channel cancelled");
+    }
+    std::unique_ptr<NativeClientChannel> native_;
+    rwn::transport::AuthenticatedPeerEvidence peer_{};
+    std::mutex read_mutex_, write_mutex_;
+    std::atomic<bool> cancelled_{};
+};
+}
+
+std::unique_ptr<rwn::transport::TlsByteChannel> connect_dedicated_tls_channel(
+    const SchannelFallbackClientOptions& options, const TransportEndpoint& endpoint) {
+    validate_schannel_fallback_client_options(options);
+    rwn::transport::validate_transport_endpoint(endpoint);
+    return std::make_unique<DedicatedSchannelChannel>(options, endpoint);
 }
 
 }  // namespace rwn::platform::windows

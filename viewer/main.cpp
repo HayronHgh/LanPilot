@@ -4,6 +4,7 @@
 #include "rwn/core/content_hash.hpp"
 #include "rwn/platform/windows/desktop_runtime.hpp"
 #include "d3d11_renderer.hpp"
+#include "tls_preview.hpp"
 
 #include <Windows.h>
 #include <shellapi.h>
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <memory>
 #include <sstream>
+#include <iostream>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -84,6 +86,9 @@ std::uint32_t parse_u32(
 }
 
 struct ViewerLaunchOptions {
+    bool tls{};
+    rwn::platform::windows::SchannelFallbackClientOptions tls_options;
+    rwn::transport::TransportEndpoint tls_endpoint;
     std::wstring host;
     std::filesystem::path identity;
     std::wstring remote_agent;
@@ -115,6 +120,34 @@ ViewerLaunchOptions parse_launch_options(
         throw std::invalid_argument("viewer requires host, key and agent");
     }
     ViewerLaunchOptions options;
+    if (std::wstring_view(argv[1]) == L"--tls") {
+        if (argc != 10 && argc != 12) throw std::invalid_argument("TLS viewer arguments invalid");
+        using Connection = rwn::viewer::TlsPreviewConnection;
+        options.tls = true;
+        options.tls_endpoint = {Connection::ascii(argv[2]),
+            static_cast<std::uint16_t>(parse_u32(argv[3],1,65535,"TLS port")),rwn::transport::NetworkPath::lan};
+        options.tls_options.client_certificate_sha1 =
+            rwn::platform::windows::parse_schannel_sha1_thumbprint(Connection::ascii(argv[4]));
+        options.tls_options.allowed_server_certificate_sha256 = {
+            rwn::platform::windows::parse_schannel_sha256_fingerprint(Connection::ascii(argv[5]))};
+        options.tls_options.exclusive_root_der = Connection::read_der(argv[6]);
+        options.tls_options.exclusive_crl_der = Connection::read_der(argv[7]);
+        const std::wstring_view control = argv[8], mode = argv[9];
+        if ((control != L"view-only" && control != L"interactive") ||
+            (mode != L"h264-only" && mode != L"exact-only"))
+            throw std::invalid_argument("invalid TLS viewer mode");
+        options.interactive = control == L"interactive";
+        options.exact_only = mode == L"exact-only";
+        options.raw_rect_experimental = options.exact_only;
+        options.h264_only_explicit = !options.exact_only;
+        options.visual_protocol = options.lan_quality = true;
+        options.maximum_width=1920; options.maximum_height=1080; options.frames_per_second=60;
+        if (argc == 12) {
+            if (std::wstring_view(argv[10]) != L"--probe-seconds") throw std::invalid_argument("invalid TLS probe flag");
+            options.probe_seconds = parse_u32(argv[11],1,60,"probe seconds");
+        }
+        return options;
+    }
     options.host = argv[1];
     options.identity = std::filesystem::path(argv[2]);
     options.remote_agent = argv[3];
@@ -464,6 +497,14 @@ struct ViewerState {
     std::uint64_t frame_revision{};
     std::deque<SnapshotCommand> snapshot_commands;
     std::atomic_uint64_t rendered_revision{};
+    std::atomic_uint64_t successful_present_receipts{};
+    std::atomic_bool tls_runtime_failed{};
+    void record_present_receipt(const rwn::viewer::D3D11RenderReceipt& receipt) {
+        if (receipt.frame_id == 0 || receipt.framebuffer_committed_at_us == 0 ||
+            receipt.present_submitted_at_us < receipt.framebuffer_committed_at_us)
+            throw std::runtime_error("invalid compositor Present receipt");
+        successful_present_receipts.fetch_add(1,std::memory_order_relaxed);
+    }
     std::wstring status{L"Connecting to Mac preview..."};
     std::wstring title{L"Remote Workspace Viewer - View Only"};
     std::wstring remote_metrics;
@@ -473,6 +514,14 @@ struct ViewerState {
     HANDLE output_read{};
     HANDLE error_read{};
     HANDLE input_write{};
+    std::unique_ptr<rwn::viewer::TlsPreviewConnection> tls;
+    std::jthread tls_heartbeat;
+    bool read_visual(std::span<std::byte> bytes, bool message_start = false) {
+        return tls ? tls->read(bytes, message_start) : read_exact(output_read,bytes);
+    }
+    void write_control(std::span<const std::byte> bytes) {
+        if (tls) tls->write(bytes); else write_exact(input_write,bytes);
+    }
     std::unique_ptr<rwn::viewer::D3D11Nv12Renderer> renderer;
     bool visual_protocol{};
     bool visual_trace_enabled{};
@@ -538,9 +587,19 @@ struct ViewerState {
         compositor_ready.notify_one();
     }
 
+    void enqueue_heartbeat() {
+        enqueue_control({
+            .type = rwn::desktop::ReverseControlType::ping,
+            .payload = {},
+            .occurred_at_us = steady_timestamp_us(),
+        }, false);
+    }
+
     void enqueue_control(
         PendingControlMessage message, const bool pointer_latest) {
-        if (!interactive || input_write == nullptr || stopping) return;
+        const bool input = message.type == rwn::desktop::ReverseControlType::input_event ||
+                           message.type == rwn::desktop::ReverseControlType::release_all_input;
+        if ((input && !interactive) || (!tls && (!interactive || input_write == nullptr)) || stopping) return;
         std::uint64_t queued_epoch{};
         std::uint32_t queued_depth{};
         std::uint64_t superseded_correlation{};
@@ -815,10 +874,11 @@ struct ViewerState {
 
     void stop() {
         if (stopping.exchange(true)) return;
-        if (interactive && input_write != nullptr) {
+        if (tls_heartbeat.joinable()) tls_heartbeat.request_stop();
+        if (tls || (interactive && input_write != nullptr)) {
             {
                 std::lock_guard lock(control_mutex);
-                reliable_control.push_back({
+                if (interactive) reliable_control.push_back({
                     .type = rwn::desktop::ReverseControlType::
                         release_all_input,
                     .payload = {},
@@ -831,6 +891,8 @@ struct ViewerState {
             control_ready.notify_all();
             if (control_writer.joinable()) control_writer.join();
         }
+        if (tls) tls->cancel();
+        if (tls_heartbeat.joinable()) tls_heartbeat.join();
         if (compositor.joinable()) compositor.request_stop();
         compositor_ready.notify_all();
         if (input_write != nullptr) {
@@ -1002,6 +1064,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                         const auto receipt =
                             state.renderer->commit_full_snapshot(
                                 state.window, snapshot_command->frame_id);
+                        state.record_present_receipt(receipt);
                         if (!state.canonical_framebuffer.commit_snapshot(
                                 snapshot_command->representation_epoch,
                                 snapshot_command->frame_id)) {
@@ -1157,6 +1220,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                         }
                         const auto receipt = state.renderer->commit_framebuffer(
                             state.window, snapshot_command->frame_id);
+                        state.record_present_receipt(receipt);
                         const auto patch_finished_at_us = steady_timestamp_us();
                         if (!state.canonical_framebuffer.commit_rect(
                                 snapshot_command->representation_epoch,
@@ -1261,6 +1325,10 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                 }
             } catch (const std::exception& error) {
                 state.renderer->cancel_full_snapshot();
+                if (state.tls && !state.stopping) {
+                    state.tls_runtime_failed.store(true);
+                    std::cerr << "tls_runtime_error stage=snapshot reason=" << error.what() << '\n';
+                }
                 state.renderer->cancel_framebuffer_update();
                 state.canonical_framebuffer.cancel_rect(
                     snapshot_command->representation_epoch);
@@ -1269,7 +1337,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                 if (snapshot_command->kind ==
                     SnapshotCommandKind::rect_transaction) {
                     ++state.rect_cancels;
-                    if (state.interactive) {
+                    if (state.interactive || state.tls) {
                         state.enqueue_control({
                             .type = rwn::desktop::ReverseControlType::
                                 request_full_snapshot,
@@ -1333,6 +1401,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                 ? receipt->present_submitted_at_us
                 : steady_timestamp_us();
             if (receipt) {
+                state.record_present_receipt(*receipt);
                 auto lifecycle = state.current_lifecycle();
                 if (lifecycle) {
                     lifecycle->record(
@@ -1352,6 +1421,10 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
                 1000.0);
         } catch (const std::exception& error) {
             handled_revision = revision;
+            if (state.tls && !state.stopping) {
+                state.tls_runtime_failed.store(true);
+                std::cerr << "tls_runtime_error stage=render reason=" << error.what() << '\n';
+            }
             state.rendered_revision.store(
                 revision, std::memory_order_release);
             state.set_status(utf8_to_utf16(error.what()));
@@ -1402,8 +1475,8 @@ void control_writer_loop(ViewerState& state) {
             rwn::desktop::validate_reverse_control_payload(
                 rwn::desktop::decode_reverse_control_header(header),
                 message.payload);
-            write_exact(state.input_write, header);
-            write_exact(state.input_write, message.payload);
+            state.write_control(header);
+            state.write_control(message.payload);
             if (message.input_correlation_id != 0U) {
                 if (const auto lifecycle = state.current_lifecycle(); lifecycle) {
                     lifecycle->record(
@@ -1434,8 +1507,15 @@ void control_writer_loop(ViewerState& state) {
                 }
             }
         }
-        static_cast<void>(FlushFileBuffers(state.input_write));
+        if (!state.tls) static_cast<void>(FlushFileBuffers(state.input_write));
     } catch (const std::exception& error) {
+        if (state.tls) {
+            if (!state.stopping) {
+                state.tls_runtime_failed.store(true);
+                std::cerr << "tls_runtime_error stage=control reason=" << error.what() << '\n';
+            }
+            state.tls->cancel();
+        }
         if (!state.stopping) {
             state.set_status(utf8_to_utf16(error.what()));
         }
@@ -1515,7 +1595,7 @@ void frame_reader_loop(
                 .rectangles = {},
                 .bytes = {},
             });
-            if (state.interactive) {
+            if (state.interactive || state.tls) {
                 state.enqueue_control({
                     .type = rwn::desktop::ReverseControlType::
                         request_full_snapshot,
@@ -1538,11 +1618,11 @@ void frame_reader_loop(
                 std::array<
                     std::byte,
                     rwn::desktop::visual_message_header_size> visual_wire{};
-                if (!read_exact(state.output_read, visual_wire)) break;
+                if (!state.read_visual(visual_wire, true)) break;
                 const auto header =
                     rwn::desktop::decode_visual_message_header(visual_wire);
                 std::vector<std::byte> payload(header.payload_size);
-                if (!read_exact(state.output_read, payload)) break;
+                if (!state.read_visual(payload)) break;
                 rwn::desktop::validate_visual_message_payload(header, payload);
                 if (!rwn::desktop::visual_message_allowed(
                         exact_only
@@ -1844,6 +1924,8 @@ void frame_reader_loop(
                         .session_generation = header.session_generation,
                         .representation_epoch = header.representation_epoch,
                         .frame_id = header.frame_id,
+                        .width = incoming_snapshot->width,
+                        .height = incoming_snapshot->height,
                         .canonical_sha256 = digest,
                         .rectangles = {},
                         .bytes = {},
@@ -1931,7 +2013,7 @@ void frame_reader_loop(
                     .encoded = std::move(access_unit.encoded),
                 };
             } else {
-                if (!read_exact(state.output_read, wire)) break;
+                if (!state.read_visual(wire)) break;
                 const auto header =
                     rwn::desktop::decode_encoded_preview_frame_header(wire);
                 encoded = {
@@ -1943,7 +2025,7 @@ void frame_reader_loop(
                     .keyframe = header.keyframe,
                     .encoded = std::vector<std::byte>(header.payload_size),
                 };
-                if (!read_exact(state.output_read, encoded.encoded)) break;
+                if (!state.read_visual(encoded.encoded)) break;
             }
             const auto received_at_us = steady_timestamp_us();
             auto lifecycle = state.ensure_lifecycle(frame_session_generation);
@@ -2144,8 +2226,16 @@ void frame_reader_loop(
                 .bytes = {},
             });
         }
-        if (!state.stopping) state.set_status(L"Mac preview stream ended");
+        if (!state.stopping) {
+            state.set_status(L"Mac preview stream ended");
+            if (state.tls) state.tls_runtime_failed.store(true);
+        }
+        if (state.tls) state.tls->cancel();
     } catch (const std::exception& error) {
+        if (state.tls && !state.stopping) {
+            state.tls_runtime_failed.store(true);
+            std::cerr << "tls_runtime_error stage=visual_read reason=" << error.what() << '\n';
+        }
         if (!state.stopping) {
             try {
                 state.enqueue_snapshot_command({
@@ -2160,6 +2250,7 @@ void frame_reader_loop(
             }
         }
         state.set_status(utf8_to_utf16(error.what()));
+        if (state.tls) state.tls->cancel();
     }
 }
 
@@ -2906,7 +2997,8 @@ int WINAPI wWinMain(
             nullptr, nullptr, instance, &state);
         if (window == nullptr) throw std::runtime_error("create viewer window failed");
         std::optional<FocusedKeyboardCapture> keyboard_capture;
-        if (options.interactive && options.probe_seconds == 0) keyboard_capture.emplace(window);
+        if (!options.tls && options.interactive && options.probe_seconds == 0)
+            keyboard_capture.emplace(window);
         if (options.visual_trace) {
             state.initialize_visual_trace(options.visual_trace_path);
         }
@@ -2919,7 +3011,27 @@ int WINAPI wWinMain(
             [&state](const std::stop_token stop) {
                 compositor_loop(state, stop);
             });
-        start_ssh(
+        if (options.tls) {
+            state.tls = std::make_unique<rwn::viewer::TlsPreviewConnection>(
+                options.tls_options,options.tls_endpoint,options.interactive);
+            if (options.interactive && options.probe_seconds == 0)
+                keyboard_capture.emplace(window);
+            state.control_writer = std::jthread([&state] { control_writer_loop(state); });
+            state.frame_reader = std::jthread([&state,&options] {
+                frame_reader_loop(state,true,options.raw_rect_experimental,options.exact_only);
+            });
+            state.tls_heartbeat = std::jthread([&state](std::stop_token stop) {
+                unsigned ticks{};
+                while (!stop.stop_requested() && !state.stopping) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (++ticks == 50) {
+                        ticks=0;
+                        try { state.enqueue_heartbeat(); }
+                        catch (...) { state.tls->cancel(); break; }
+                    }
+                }
+            });
+        } else start_ssh(
             state, options.host, options.identity, options.remote_agent,
             options.maximum_width, options.maximum_height,
             options.frames_per_second, options.bitrate_kbps,
@@ -2938,9 +3050,19 @@ int WINAPI wWinMain(
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        if (options.tls && options.probe_seconds) {
+            std::cerr << "tls_viewer_probe present_receipts=" << state.successful_present_receipts.load()
+                      << " runtime_failed=" << state.tls_runtime_failed.load()
+                      << " snapshot_commits=" << state.snapshot_commits << '\n';
+            return state.successful_present_receipts.load() > 0 &&
+                !state.tls_runtime_failed.load() ? 0 : 3;
+        }
         return static_cast<int>(message.wParam);
     } catch (const std::exception& error) {
-        if (hidden_probe) return 1; // Never block an unattended probe on a modal UI.
+        if (hidden_probe) {
+            std::cerr << "viewer_probe_failed=" << error.what() << '\n';
+            return 1; // Never block an unattended probe on a modal UI.
+        }
         const auto message = utf8_to_utf16(error.what());
         MessageBoxW(
             nullptr, message.c_str(), L"Remote Workspace Viewer",

@@ -7,6 +7,47 @@ int main(int argc, char** argv) {
     ViewerState state;
     HANDLE reader{};
     try {
+        // Exercise the real heartbeat producer, scheduler and wire encoder.
+        // A default PendingControlMessage had timestamp=0 and disconnected
+        // both TLS sockets when the first five-second heartbeat was sent.
+        {
+            ViewerState heartbeat;
+            HANDLE heartbeat_reader{};
+            if (!CreatePipe(&heartbeat_reader, &heartbeat.input_write, nullptr, 65536))
+                throw std::runtime_error("heartbeat pipe failed");
+            heartbeat.interactive = true; // Enable the local pipe adapter only.
+            heartbeat.enqueue_heartbeat();
+            heartbeat.control_closing = true;
+            heartbeat.control_writer = std::jthread([&] { control_writer_loop(heartbeat); });
+            std::array<std::byte, reverse_control_header_size> bytes{};
+            const auto received = read_exact(heartbeat_reader, bytes);
+            CloseHandle(heartbeat_reader);
+            heartbeat.control_writer.join();
+            heartbeat.interactive = false;
+            if (!received) throw std::runtime_error("heartbeat header missing");
+            const auto header = decode_reverse_control_header(bytes);
+            validate_reverse_control_payload(header, {});
+            if (header.type != ReverseControlType::ping || header.sequence != 1 ||
+                header.input_epoch != 1 || header.occurred_at_us == 0 || header.payload_size != 0)
+                throw std::runtime_error("heartbeat metadata invalid");
+        }
+        // Evidence bookkeeping only; this deliberately does not claim GPU
+        // execution. Scheduling revisions must never count as actual presents.
+        state.rendered_revision.store(100);
+        if (state.successful_present_receipts.load() != 0)
+            throw std::runtime_error("scheduled revision counted as present");
+        for (const auto receipt : {rwn::viewer::D3D11RenderReceipt{0,2,3},
+                                   rwn::viewer::D3D11RenderReceipt{1,0,3},
+                                   rwn::viewer::D3D11RenderReceipt{1,3,2}}) {
+            bool rejected = false;
+            try { state.record_present_receipt(receipt); }
+            catch (const std::runtime_error&) { rejected = true; }
+            if (!rejected || state.successful_present_receipts.load() != 0)
+                throw std::runtime_error("invalid Present receipt admitted");
+        }
+        state.record_present_receipt({1,2,3});
+        if (state.successful_present_receipts.load() != 1)
+            throw std::runtime_error("valid Present receipt not recorded");
         const bool motion = argc == 2 && std::string_view(argv[1]) == "motion";
         const bool pressure = argc == 2 && std::string_view(argv[1]) == "pressure";
         if (argc > 2 || (argc == 2 && !motion && !pressure)) return 64;

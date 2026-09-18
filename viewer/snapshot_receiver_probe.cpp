@@ -121,6 +121,17 @@ int main(int argc, char** argv) {
             state.renderer->committed_framebuffer_bgra() != pixels)
             throw std::runtime_error("receiver recovery did not produce exact final surface");
         std::vector<FrameCommitAck> acks;
+        // Exact-only has no decoded H.264 frame to supply pointer dimensions.
+        // Exercise the production coordinate mapper without injecting input.
+        if (state.exact_surface_width.load() != width ||
+            state.exact_surface_height.load() != height)
+            throw std::runtime_error("snapshot commit lost pointer surface dimensions");
+        const auto left = map_client_pointer_to_surface(state, window, 80, 90);
+        const auto right = map_client_pointer_to_surface(state, window, 240, 90);
+        if (!left || !right || left->first >= right->first ||
+            left->second != right->second ||
+            map_client_pointer_to_surface(state, window, -1, 90))
+            throw std::runtime_error("exact-only pointer mapping failed");
         std::size_t recovery_requests{};
         for (const auto& control : state.reliable_control) {
             if (control.type == ReverseControlType::frame_commit_ack)

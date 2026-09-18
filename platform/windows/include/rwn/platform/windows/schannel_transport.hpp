@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rwn/transport/encrypted_fallback.hpp"
+#include "rwn/transport/tls_byte_channel.hpp"
 
 #include <array>
 #include <chrono>
@@ -24,10 +25,20 @@ struct SchannelFallbackClientOptions {
     std::size_t maximum_streams{64};
     std::size_t maximum_queued_stream_messages{256};
     std::size_t maximum_queued_stream_bytes{32U * 1024U * 1024U};
+    // Optional application-exclusive DER root. Never added to a system store.
+    // Empty preserves existing system-chain validation.
+    std::vector<std::byte> exclusive_root_der{};
+    std::vector<std::byte> exclusive_crl_der{};
 };
 
 void validate_schannel_fallback_client_options(
     const SchannelFallbackClientOptions& options);
+
+// Every invocation creates a separate socket. No RWF multiplex framing or
+// TLS/DTLS pairing is used. LPT1 admission must follow TLS establishment.
+[[nodiscard]] std::unique_ptr<rwn::transport::TlsByteChannel>
+connect_dedicated_tls_channel(const SchannelFallbackClientOptions& options,
+    const rwn::transport::TransportEndpoint& endpoint);
 
 [[nodiscard]] std::array<std::uint8_t, 20>
 parse_schannel_sha1_thumbprint(std::string_view value);

@@ -1,3 +1,4 @@
+#include "channel_session_tests.hpp"
 #include "rwn/core/audit.hpp"
 #include "rwn/audio/audio.hpp"
 #include "rwn/client/session_client.hpp"
@@ -4579,6 +4580,7 @@ void visual_evidence_compares_latency_quality_and_exact_residency() {
 
 int main() {
     rwn::test::Runner runner;
+    runner.run("independent TCP channels bind and revoke together", channel_tests::workflow);
     runner.run("snapshot GPU batch remains row aligned independent of wire chunks", [] {
         constexpr std::size_t budget = 1024U * 1024U;
         for (const std::size_t width : {1920U, 1919U, 1280U, 1U}) {
