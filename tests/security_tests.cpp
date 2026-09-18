@@ -1860,6 +1860,26 @@ void pairing_control_rejects_wrong_code_rebinding_and_forged_reply() {
     RWN_CHECK(!rebound_reply.reply.accepted);
     RWN_CHECK(rebound_reply.reply.reason_code == "identity_binding_denied");
     RWN_CHECK(!store.exists());
+    const rwn::transport::AuthenticatedPeerEvidence retry_peer{
+        .certificate_sha256 = rwn::transport::parse_apple_network_sha256_fingerprint(fingerprint),
+        .tls_1_3_negotiated = true, .certificate_chain_valid = true,
+        .revocation_checked = true};
+    for (unsigned attempt = 0; attempt < 3U; ++attempt) {
+        SecurityControlStream retry;
+        retry.input = wrong_code.input;
+        RWN_CHECK(!service.serve_confirmation(retry, retry_peer, now).reply.accepted);
+    }
+    command.certificate_sha256 = fingerprint;
+    SecurityControlStream exhausted;
+    exhausted.input = rwn::protocol::encode({
+        .version = 1, .type = rwn::protocol::MessageType::pairing_confirm,
+        .correlation_id = "pairing-windows-client",
+        .payload = rwn::protocol::encode_pairing_confirm_command(command),
+        .unknown_fields = {}});
+    rwn::test::require_throws<std::invalid_argument>([&] {
+        static_cast<void>(service.serve_confirmation(exhausted, retry_peer, now));
+    }, "correct code after exhausted window must be denied");
+    RWN_CHECK(!store.exists());
     SecurityControlStream forged;
     forged.input = rwn::protocol::encode({
         .version = 1,

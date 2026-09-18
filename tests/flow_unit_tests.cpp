@@ -1603,6 +1603,14 @@ void pairing_control_binds_transport_identity_and_persists_device() {
               served.reply);
     RWN_CHECK(rwn::protocol::decode(client_stream.writes.front()).type ==
               rwn::protocol::MessageType::pairing_confirm);
+    ControlTestStream replay;
+    replay.reads = client_stream.writes;
+    rwn::test::require_throws<std::invalid_argument>([&] {
+        static_cast<void>(service.serve_confirmation(replay,
+            {.certificate_sha256 = rwn::transport::parse_apple_network_sha256_fingerprint(client_fingerprint),
+             .tls_1_3_negotiated = true, .certificate_chain_valid = true,
+             .revocation_checked = true}, now));
+    }, "successful pairing window must not be reusable");
     std::filesystem::remove_all(root, ignored);
 }
 

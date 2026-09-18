@@ -6,6 +6,7 @@
 #include "rwn/transport/transport.hpp"
 
 #include <chrono>
+#include <mutex>
 #include <string>
 
 namespace rwn::node {
@@ -33,6 +34,9 @@ private:
     std::string expected_device_id_;
     rwn::core::PairingStore& store_;
     std::chrono::hours pairing_record_lifetime_;
+    std::mutex confirmation_mutex_;
+    unsigned attempts_{};
+    bool consumed_{};
 };
 
 }  // namespace rwn::node

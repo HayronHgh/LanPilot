@@ -29,6 +29,11 @@ ServedPairingConfirmation NodePairingService::serve_confirmation(
     const rwn::transport::AuthenticatedPeerEvidence& peer,
     const rwn::core::TimePoint now) {
     rwn::transport::validate_authenticated_peer_evidence(peer);
+    const std::lock_guard lock(confirmation_mutex_);
+    if (consumed_ || attempts_ >= 5U || now >= challenge_.expires_at) {
+        throw std::invalid_argument("pairing window closed; reopen locally");
+    }
+    ++attempts_; // Malformed requests consume the same local window budget.
     const auto envelope = rwn::protocol::decode(control_stream.read());
     if (envelope.version != 1 ||
         envelope.type != rwn::protocol::MessageType::pairing_confirm ||
@@ -69,6 +74,8 @@ ServedPairingConfirmation NodePairingService::serve_confirmation(
             }
             reply.accepted = true;
             reply.reason_code = "pairing_completed";
+            consumed_ = true;
+            challenge_.six_digit_code.clear();
         } catch (const std::invalid_argument&) {
             reply.reason_code = "pairing_denied";
         }
