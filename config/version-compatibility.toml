@@ -1,0 +1,8 @@
+product_version = "0.1.0"
+minimum_peer_version = "0.1.0"
+maximum_peer_version = "0.1.999"
+protocol_minimum = 1
+protocol_maximum = 1
+state_schema_current = 1
+state_schema_minimum_readable = 1
+package_schema = 1

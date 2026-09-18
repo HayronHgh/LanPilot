@@ -1,0 +1,15 @@
+/build/
+/out/
+/.cache/
+compile_commands.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+.env
+.env.*
+!.env.example
+secrets/
+certs/

@@ -1,0 +1,4 @@
+# Agent Runtime requires an explicit policy; this is not the default Agent policy.
+principal = "coding-agent"
+workspaces = ["example-workspace"]
+allow = ["agent.run", "workspace.read", "workspace.write", "build.submit", "test.run", "artifact.read", "git.status", "git.diff"]

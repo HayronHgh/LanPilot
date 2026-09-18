@@ -1,0 +1,356 @@
+syntax = "proto3";
+
+package rwn.protocol.v1;
+
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_HUMAN = 1;
+  PRINCIPAL_KIND_DEVICE = 2;
+  PRINCIPAL_KIND_AGENT = 3;
+}
+
+message Hello {
+  uint32 protocol_version = 1;
+  string device_id = 2;
+}
+
+message CapabilityRequest {
+  string principal_id = 1;
+  PrincipalKind principal_kind = 2;
+  string workspace_id = 3;
+  repeated string capabilities = 4;
+}
+
+message SessionOpen {
+  string session_id = 1;
+  string workspace_id = 2;
+  repeated string granted_capabilities = 3;
+  repeated string denied_capabilities = 4;
+}
+
+message WorkspaceRevision {
+  string workspace_id = 1;
+  uint64 revision = 2;
+  bytes manifest_hash = 3;
+}
+
+message BuildSubmit {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 workspace_revision = 3;
+  string build_id = 4;
+  string profile = 5;
+}
+
+message PairingConfirm {
+  string six_digit_code = 1;
+  string device_id = 2;
+  string display_name = 3;
+  string certificate_sha256 = 4;
+}
+
+message PairingResult {
+  bool accepted = 1;
+  string device_id = 2;
+  string reason_code = 3;
+}
+
+message BuildStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_SUCCEEDED = 1;
+    STATE_FAILED = 2;
+    STATE_CANCELLED = 3;
+    STATE_REJECTED = 4;
+  }
+  bool accepted = 1;
+  string build_id = 2;
+  State state = 3;
+  sint32 exit_code = 4;
+  uint64 elapsed_ms = 5;
+  bool timed_out = 6;
+  bool cancelled = 7;
+  bool stdout_truncated = 8;
+  bool stderr_truncated = 9;
+  bytes stdout_log = 10;
+  bytes stderr_log = 11;
+  string evidence_sha256 = 12;
+  repeated string artifact_ids = 13;
+  string reason_code = 14;
+}
+
+message ArtifactFetch {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 source_revision = 3;
+  string artifact_id = 4;
+  string transfer_id = 5;
+}
+
+message ArtifactChunkDescriptor {
+  uint32 index = 1;
+  uint64 offset = 2;
+  uint32 size = 3;
+  string sha256 = 4;
+}
+
+message ArtifactManifest {
+  bool accepted = 1;
+  string artifact_id = 2;
+  string transfer_id = 3;
+  string build_id = 4;
+  uint64 source_revision = 5;
+  string name = 6;
+  string sha256 = 7;
+  uint64 size = 8;
+  string platform = 9;
+  string architecture = 10;
+  repeated ArtifactChunkDescriptor chunks = 11;
+  string reason_code = 12;
+}
+
+message ArtifactChunk {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 source_revision = 3;
+  string artifact_id = 4;
+  string transfer_id = 5;
+  uint32 index = 6;
+  bytes payload = 7;
+}
+
+message ArtifactResume {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 source_revision = 3;
+  string artifact_id = 4;
+  string transfer_id = 5;
+  repeated uint32 missing_chunks = 6;
+}
+
+message DeploySubmit {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 revision = 3;
+  string artifact_id = 4;
+  string deployment_id = 5;
+}
+
+message DeploymentStepEvidence {
+  uint32 step = 1;
+  bool succeeded = 2;
+  int32 exit_code = 3;
+  uint64 elapsed_ms = 4;
+  bool timed_out = 5;
+  bool cancelled = 6;
+  string reason_code = 7;
+}
+
+message DeployStatus {
+  bool accepted = 1;
+  string deployment_id = 2;
+  string artifact_id = 3;
+  string artifact_sha256 = 4;
+  string build_id = 5;
+  uint64 source_revision = 6;
+  uint32 status = 7;
+  repeated DeploymentStepEvidence steps = 8;
+  string evidence_sha256 = 9;
+  string reason_code = 10;
+}
+
+message DesktopKeyframeRequest {
+  uint64 after_frame_id = 1;
+  string reason_code = 2;
+}
+
+message DesktopPermissionStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_NOT_DETERMINED = 1;
+    STATE_DENIED = 2;
+    STATE_GRANTED = 3;
+  }
+  State capture = 1;
+  State input = 2;
+}
+
+message DesktopLatency {
+  uint64 frame_id = 1;
+  uint64 captured_at_us = 2;
+  uint64 encoded_at_us = 3;
+  uint64 received_at_us = 4;
+  uint64 decoded_at_us = 5;
+  uint64 displayed_at_us = 6;
+}
+
+// RawKey, TextCommit, PointerMove and PointerButton intentionally remain
+// distinct so an IME commit is never guessed from physical key events.
+message RawKey {
+  uint64 sequence = 1;
+  uint64 occurred_at_us = 2;
+  uint32 hid_usage = 3;
+  bool pressed = 4;
+}
+
+message TextCommit {
+  uint64 sequence = 1;
+  uint64 occurred_at_us = 2;
+  string utf8_text = 3;
+}
+
+message PointerMove {
+  uint64 sequence = 1;
+  uint64 occurred_at_us = 2;
+  uint32 normalized_x = 3;
+  uint32 normalized_y = 4;
+}
+
+message PointerButton {
+  uint64 sequence = 1;
+  uint64 occurred_at_us = 2;
+  uint32 button = 3;
+  bool pressed = 4;
+}
+
+message ClipboardUpdate {
+  string origin = 1;
+  uint64 revision = 2;
+  string content_sha256 = 3;
+  string utf8_text = 4;
+}
+
+enum AgentTool {
+  AGENT_TOOL_UNSPECIFIED = 0;
+  AGENT_TOOL_WORKSPACE_READ = 1;
+  AGENT_TOOL_WORKSPACE_PATCH = 2;
+  AGENT_TOOL_BUILD_SUBMIT = 3;
+  AGENT_TOOL_TEST_RUN = 4;
+  AGENT_TOOL_GIT_STATUS = 5;
+  AGENT_TOOL_GIT_DIFF = 6;
+  AGENT_TOOL_ARTIFACT_INSPECT = 7;
+}
+
+enum AgentJobState {
+  AGENT_JOB_STATE_UNSPECIFIED = 0;
+  AGENT_JOB_STATE_RUNNING = 1;
+  AGENT_JOB_STATE_WAITING_REVIEW = 2;
+  AGENT_JOB_STATE_SUCCEEDED = 3;
+  AGENT_JOB_STATE_FAILED = 4;
+  AGENT_JOB_STATE_CANCELLED = 5;
+  AGENT_JOB_STATE_TIMED_OUT = 6;
+}
+
+// Identity and authorization are bound by the authenticated SessionOpen.
+message AgentJobStart {
+  string job_id = 1;
+  string workspace_id = 2;
+  uint64 source_revision = 3;
+  uint64 occurred_at_us = 4;
+}
+
+message AgentToolRequest {
+  string job_id = 1;
+  AgentTool tool = 2;
+  string relative_path = 3;
+  string expected_sha256 = 4;
+  bytes replacement = 5;
+  string profile = 6;
+  string operation_id = 7;
+  string artifact_id = 8;
+  uint64 maximum_bytes = 9;
+  uint64 occurred_at_us = 10;
+}
+
+message AgentReviewGrant {
+  string job_id = 1;
+  string reviewer_id = 2;
+  string reviewer_device_id = 3;
+  string reviewer_session_id = 4;
+  uint64 occurred_at_us = 5;
+}
+
+message AgentEvidence {
+  string evidence_id = 1;
+  string job_id = 2;
+  AgentTool tool = 3;
+  bool succeeded = 4;
+  sint32 exit_code = 5;
+  bool timed_out = 6;
+  bool cancelled = 7;
+  bool stdout_truncated = 8;
+  bool stderr_truncated = 9;
+  bytes stdout_log = 10;
+  bytes stderr_log = 11;
+  string before_sha256 = 12;
+  string after_sha256 = 13;
+  string diff_summary = 14;
+  string build_id = 15;
+  string artifact_id = 16;
+  string artifact_sha256 = 17;
+  uint64 source_revision = 18;
+  uint64 elapsed_ms = 19;
+}
+
+message AgentJobResult {
+  string job_id = 1;
+  AgentJobState state = 2;
+  repeated string evidence_ids = 3;
+  uint64 finished_at_us = 4;
+}
+
+enum VideoFeature {
+  VIDEO_FEATURE_UNSPECIFIED = 0;
+  VIDEO_FEATURE_H264 = 1;
+  VIDEO_FEATURE_HEVC = 2;
+  VIDEO_FEATURE_AV1 = 3;
+  VIDEO_FEATURE_4K = 4;
+  VIDEO_FEATURE_120_FPS = 5;
+  VIDEO_FEATURE_HDR = 6;
+  VIDEO_FEATURE_MULTI_MONITOR = 7;
+  VIDEO_FEATURE_ADAPTIVE_BITRATE = 8;
+}
+
+message TransportCapabilities {
+  uint32 minimum_protocol_version = 1;
+  uint32 maximum_protocol_version = 2;
+  repeated VideoFeature video_features = 3;
+  uint32 maximum_width = 4;
+  uint32 maximum_height = 5;
+  uint32 maximum_frames_per_second = 6;
+  bool datagrams = 7;
+}
+
+message TransportRecoveryCursor {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 workspace_revision = 3;
+  repeated string active_build_ids = 4;
+  uint64 audit_sequence = 5;
+}
+
+message TransportStatus {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_QUIC = 1;
+    MODE_TLS_TCP_UDP_FALLBACK = 2;
+  }
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_DISCONNECTED = 1;
+    STATE_CONNECTING = 2;
+    STATE_READY = 3;
+    STATE_MIGRATING = 4;
+    STATE_CLOSED = 5;
+  }
+  Mode mode = 1;
+  State state = 2;
+  string network_path_class = 3;
+  string reason_code = 4;
+  uint64 primary_connection_attempts = 5;
+  uint64 primary_connection_failures = 6;
+  uint64 fallback_connections = 7;
+  uint64 migration_attempts = 8;
+  uint64 migration_failures = 9;
+  uint64 reconnects = 10;
+}

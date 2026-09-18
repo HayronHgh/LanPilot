@@ -1,0 +1,5 @@
+directory	RemoteWorkspaceNode	0	0	0755	-
+directory	RemoteWorkspaceNode/bin	0	0	0755	-
+file	RemoteWorkspaceNode/bin/rwn-node.exe	1048576	524288	0755	-
+file	RemoteWorkspaceNode/README.md	4096	2048	0644	-
+symlink	RemoteWorkspaceNode/current-node	0	0	0777	RemoteWorkspaceNode/bin/rwn-node.exe

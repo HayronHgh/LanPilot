@@ -1,0 +1,4 @@
+# Strict Remote Workspace Node policy schema.
+principal = "windows-client"
+workspaces = ["example-workspace"]
+allow = ["workspace.sync", "build.submit", "artifact.download", "deploy.execute"]

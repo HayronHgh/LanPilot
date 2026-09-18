@@ -1,0 +1,11 @@
+# Copy outside the repository and keep this file root-owned and non-writable by Node/Worker.
+artifact_root = "/Users/remote-builder/artifacts"
+runtime_root = "/Library/Application Support/RemoteWorkspaceNode/runtime"
+active_relative_path = "bin/application.zip"
+socket_path = "/Library/Application Support/RemoteWorkspaceNode/run/deployment-broker.sock"
+allowed_node_uid = 501
+stop_command = ["/usr/bin/launchctl", "stop", "com.example.application"]
+start_command = ["/usr/bin/launchctl", "start", "com.example.application"]
+health_command = ["/usr/bin/curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+command_timeout_seconds = 30
+accept_timeout_seconds = 120

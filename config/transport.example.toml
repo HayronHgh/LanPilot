@@ -1,0 +1,9 @@
+alpn = "rwn/1"
+require_tls13 = true
+enable_datagrams = true
+enable_connection_migration = true
+enable_fallback = true
+maximum_datagram_bytes = 1400
+idle_timeout_seconds = 30
+keep_alive_seconds = 5
+primary_failures_before_fallback = 2

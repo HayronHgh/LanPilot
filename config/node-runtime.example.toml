@@ -1,0 +1,22 @@
+# Copy outside the repository and replace every value for the target Mac Node.
+transport_provider = "network-framework"
+local_identity_hex = "0123"
+listen_port = 4433
+transport_settings_file = "/absolute/RemoteWorkspaceNode/config/transport.example.toml"
+policy_file = "/absolute/RemoteWorkspaceNode/config/access-policy.example.toml"
+audit_root = "/absolute/RemoteWorkspaceNode/state"
+audit_journal = "audit/events.jsonl"
+pairing_root = "/absolute/RemoteWorkspaceNode/state/pairing"
+pairing_state_file = "device.state"
+mirror_root = "/absolute/RemoteWorkspaceNode/mirrors/example-workspace"
+workspace_state_file = "workspace/example-workspace.toml"
+workspace_config_file = "/absolute/RemoteWorkspaceNode/remote-workspace.toml"
+build_worker_socket = "/absolute/RemoteWorkspaceNode/run/build-worker.sock"
+build_worker_uid = 501
+deployment_broker_socket = "/Library/Application Support/RemoteWorkspaceNode/run/deployment-broker.sock"
+deployment_broker_uid = 0
+maximum_active_sessions = 1
+accept_timeout_seconds = 120
+# Interactive pair-once writes the active device to pairing_root.
+# For migration only, all seven legacy paired_device_* fields may be supplied
+# together until the first pairing-revoke or explicit re-pair operation.

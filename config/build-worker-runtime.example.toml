@@ -1,0 +1,10 @@
+# Copy outside the repository and replace every value for the dedicated Mac worker.
+workspace_root = "/Users/remote-builder/workspaces/example-workspace"
+workspace_config_file = "/Library/Application Support/RemoteWorkspaceNode/config/remote-workspace.toml"
+state_root = "/Library/Application Support/RemoteWorkspaceNode/state"
+workspace_state_file = "workspace/example-workspace.toml"
+evidence_root = "/Users/remote-builder/evidence"
+artifact_root = "/Users/remote-builder/artifacts"
+socket_path = "/Library/Application Support/RemoteWorkspaceNode/run/build-worker.sock"
+allowed_node_uid = 502
+accept_timeout_seconds = 120

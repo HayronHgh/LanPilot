@@ -1,0 +1,6 @@
+product = "RemoteWorkspaceNode"
+version = "@PROJECT_VERSION@"
+protocol_minimum = 1
+protocol_maximum = 1
+state_schema = 1
+package_schema = 1

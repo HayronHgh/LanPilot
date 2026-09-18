@@ -1,0 +1,8 @@
+add_executable(rwn-desktop-agent main.cpp)
+target_link_libraries(rwn-desktop-agent PRIVATE rwn::core rwn::desktop rwn_project_options)
+if(WIN32)
+  target_link_libraries(rwn-desktop-agent PRIVATE rwn::platform_windows)
+endif()
+if(APPLE)
+  target_link_libraries(rwn-desktop-agent PRIVATE rwn::platform_macos)
+endif()

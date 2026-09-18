@@ -1,0 +1,22 @@
+[workspace]
+id = "example-workspace"
+name = "example-workspace"
+source = "windows"
+mirror = "macos"
+
+[sync]
+direction = "one-way"
+exclude = [".git", "build", ".cache", "DerivedData"]
+
+[target.macos-debug]
+node = "mac-mini"
+working_dir = "."
+command = ["/opt/homebrew/bin/cmake", "--build", "build", "--config", "Debug"]
+timeout_seconds = 900
+environment_allowlist = ["CC", "CXX", "SDKROOT"]
+
+[target.macos-debug.artifacts]
+paths = ["dist/*.zip"]
+platform = "macos"
+architecture = "arm64"
+archive_app_bundles = true

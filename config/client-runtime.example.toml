@@ -1,0 +1,16 @@
+# Copy outside the repository and replace every value for the Windows Client.
+transport_provider = "msquic"
+runtime_library = "C:/absolute/RemoteWorkspaceNode/build/deps/msquic-2.5.7/build/native/bin/x64/msquic.dll"
+local_identity_sha1 = "00112233445566778899aabbccddeeff00112233"
+allowed_server_certificate_sha256 = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+host = "mac-node.example"
+port = 4433
+transport_settings_file = "C:/absolute/RemoteWorkspaceNode/config/transport.example.toml"
+source_root = "C:/absolute/source/example-workspace"
+workspace_config_file = "C:/absolute/source/example-workspace/remote-workspace.toml"
+device_id = "windows-client"
+session_id = "session-1"
+workspace_id = "example-workspace"
+requested_capabilities = ["workspace.sync", "build.submit", "artifact.download", "deploy.execute"]
+revision = 1
+lease_minutes = 15

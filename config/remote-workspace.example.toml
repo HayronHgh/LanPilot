@@ -1,0 +1,72 @@
+[workspace]
+id = "example-workspace"
+name = "Example Workspace"
+source = "windows"
+mirror = "macos"
+
+[sync]
+direction = "one-way"
+exclude = [".git", "build", ".cache", "DerivedData"]
+
+[target.cmake-debug]
+node = "mac-mini"
+working_dir = "."
+command = ["/opt/homebrew/bin/cmake", "--build", "build", "--config", "Debug"]
+timeout_seconds = 900
+environment_allowlist = ["CC", "CXX", "SDKROOT"]
+
+[target.cmake-debug.artifacts]
+paths = ["dist/*.zip"]
+platform = "macos"
+architecture = "arm64"
+archive_app_bundles = true
+
+[target.cargo-release]
+node = "mac-mini"
+working_dir = "."
+command = ["/Users/remote-builder/.cargo/bin/cargo", "build", "--release", "--locked"]
+timeout_seconds = 1200
+
+[target.cargo-release.artifacts]
+paths = ["target/release/*.dylib", "target/release/*.a"]
+platform = "macos"
+architecture = "arm64"
+archive_app_bundles = true
+
+[target.npm-test]
+node = "mac-mini"
+working_dir = "."
+command = ["/opt/homebrew/bin/npm", "test", "--", "--runInBand"]
+timeout_seconds = 900
+environment_allowlist = ["NODE_OPTIONS"]
+
+[target.npm-test.artifacts]
+paths = ["coverage/*.json"]
+platform = "macos"
+architecture = "arm64"
+archive_app_bundles = true
+
+[target.xcode-release]
+node = "mac-mini"
+working_dir = "."
+command = ["/usr/bin/xcodebuild", "-scheme", "RemoteWorkspace", "-configuration", "Release", "build"]
+timeout_seconds = 1800
+environment_allowlist = ["DEVELOPER_DIR"]
+
+[target.xcode-release.artifacts]
+paths = ["build/Release/*.app"]
+platform = "macos"
+architecture = "universal"
+archive_app_bundles = true
+
+[target.godot-export]
+node = "mac-mini"
+working_dir = "."
+command = ["/Applications/Godot.app/Contents/MacOS/Godot", "--headless", "--export-release", "macOS", "dist/game.zip"]
+timeout_seconds = 1800
+
+[target.godot-export.artifacts]
+paths = ["dist/game.zip"]
+platform = "macos"
+architecture = "universal"
+archive_app_bundles = true
