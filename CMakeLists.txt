@@ -11,6 +11,10 @@ option(RWN_BUILD_TESTS "Build workflow unit and security tests" ON)
 option(RWN_BUILD_PACKAGING "Enable install rules and CPack release archives" ON)
 
 add_library(rwn_project_options INTERFACE)
+if(WIN32)
+  # Also cover standalone helpers that do not link rwn_platform_windows.
+  target_compile_definitions(rwn_project_options INTERFACE NOMINMAX)
+endif()
 if(MSVC)
   target_compile_options(rwn_project_options INTERFACE /W4 /permissive-)
 else()
