@@ -35,6 +35,8 @@ Performance claims need workload, hardware, resolution, configuration and sample
 counts. Distinguish host-local spans from end-to-end latency, and unit tests from
 real-host acceptance. Do not describe beta RECT results as a universal speedup.
 
-Release lines: v0.1 is the H.264 release; v0.2 beta introduces custom RECT with
-H.264 fallback. No release tag should be created until its exact source and binary
+Release lines: v0.1 is H.264 + SSH; v0.2 is custom RECT + SSH;
+v0.3 is RECT + separate visual/control TLS sockets with Agent on SSH.
+Retain reviewable commits, not a release for every development snapshot.
+No release tag should be created until its exact source and binary
 lineage and relevant gates are verified.

@@ -6,12 +6,22 @@
 使用硬體 H.264、SSH、Media Foundation、D3D11，提供鍵鼠控制與等比例顯示。
 低延遲 encoder 為預設；`-EncoderMode baseline` 用於回歸比較。
 
-## v0.2 beta：RECT
+## v0.2：RECT + SSH
 
 自研 snapshot／RECT 交易保留 canonical BGRA8 狀態，透過世代、epoch 與 ACK
 避免錯誤基底造成永久畫面損壞。H.264 保留作為高動態及恢復路徑。
 目標是讓文字與小 UI 更新不必每次走完整視訊編解碼；速度優勢需以相同工作負載
 量測，不宣稱任何情況都快於 H.264。
+
+## v0.3：RECT + 分離通道（最新開發主線）
+
+畫面與控制各使用獨立 TLS TCP socket，Agent 保留 SSH。
+TLS 的兩條 socket 共用 listener port，不代表三個自訂 port。
+保留 H.264 能力，不將 Exact-only 宣稱為所有工作負載的最優選擇。
+
+僅整理這三條產品版本線；Git commit 保留可審查的功能演進，
+不為每個研究快照發布版本。正式 tag 必須對應已驗證來源與雙端產物。
+目前沒有正式 Release；見 [最新缺口與收斂順序](release-readiness.md)。
 
 ## 發布前檢查
 

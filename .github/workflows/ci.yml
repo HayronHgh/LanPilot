@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     strategy:
@@ -18,3 +21,13 @@ jobs:
         run: cmake --build build --config Debug
       - name: Workflow unit and security tests
         run: ctest --test-dir build -C Debug --output-on-failure
+      - name: TLS setup workflow checks (no network or identity-store writes)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tests/tls_connection_settings_workflow.ps1
+          ./tests/tls_identity_readiness_workflow.ps1
+          ./tests/mac_launch_agent_workflow.ps1
+      - name: Mac TLS resource security checks (isolated fixtures)
+        if: runner.os == 'macOS'
+        run: sh tests/mac_tls_resources_workflow.sh "$PWD/packaging/macos/check-tls-resources.sh"
