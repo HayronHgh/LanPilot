@@ -12,6 +12,7 @@ add_library(rwn_platform_windows
 )
 
 target_include_directories(rwn_platform_windows PUBLIC include)
+target_compile_definitions(rwn_platform_windows PRIVATE NOMINMAX)
 target_link_libraries(rwn_platform_windows PUBLIC
   rwn::audio rwn::core rwn::desktop rwn::transport)
 target_link_libraries(rwn_platform_windows PRIVATE
