@@ -1,5 +1,7 @@
 # LanPilot
 
+[English README](README.en.md)
+
 在區域網路上，從 Windows 操作 Mac。使用原生擷取、硬體 H.264 編解碼與 D3D11
 顯示，並研究用無損矩形更新改善文字畫質與小範圍操作延遲。
 

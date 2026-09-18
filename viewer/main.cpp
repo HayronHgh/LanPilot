@@ -1351,12 +1351,31 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
             continue;
         }
         if (!frame) {
+            if (revision != handled_revision && state.visual_protocol) {
+                try {
+                    static_cast<void>(state.renderer->present_framebuffer(state.window));
+                } catch (const std::exception& error) {
+                    state.set_status(utf8_to_utf16(error.what()));
+                }
+            }
             handled_revision = revision;
             state.rendered_revision.store(
                 revision, std::memory_order_release);
             continue;
         }
+        if (revision == handled_revision) continue;
         try {
+            // A resize re-presents the committed texture. Re-decoding the last
+            // video frame here would replace an exact snapshot with old lossy
+            // pixels and can leave the resized window stale until new traffic.
+            if (state.visual_protocol &&
+                frame->nv12.frame_id == last_frame_id &&
+                state.renderer->present_framebuffer(state.window)) {
+                handled_revision = revision;
+                state.rendered_revision.store(
+                    revision, std::memory_order_release);
+                continue;
+            }
             std::optional<rwn::viewer::D3D11RenderReceipt> receipt;
             if (state.visual_protocol) {
                 const auto previous_epoch =
@@ -2644,13 +2663,6 @@ LRESULT CALLBACK window_procedure(
             window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     switch (message) {
-        case WM_NCHITTEST: {
-            const auto hit = DefWindowProcW(window, message, wparam, lparam);
-            // Keep the four corner grips, but do not allow single-axis stretch.
-            if (hit == HTLEFT || hit == HTRIGHT ||
-                hit == HTTOP || hit == HTBOTTOM) return HTBORDER;
-            return hit;
-        }
         case WM_GETMINMAXINFO: {
             const auto dpi = GetDpiForWindow(window);
             RECT minimum{0, 0, MulDiv(480, static_cast<int>(dpi), 96),
@@ -2662,49 +2674,6 @@ LRESULT CALLBACK window_procedure(
             limits->ptMinTrackSize = {
                 minimum.right - minimum.left, minimum.bottom - minimum.top};
             return 0;
-        }
-        case WM_SIZING: {
-            if (wparam != WMSZ_TOPLEFT && wparam != WMSZ_TOPRIGHT &&
-                wparam != WMSZ_BOTTOMLEFT && wparam != WMSZ_BOTTOMRIGHT) {
-                return FALSE;
-            }
-            double ratio = 16.0 / 9.0;
-            if (state != nullptr) {
-                std::lock_guard lock(state->mutex);
-                if (state->frame && state->frame->nv12.height != 0) {
-                    ratio = static_cast<double>(state->frame->nv12.width) /
-                        state->frame->nv12.height;
-                } else {
-                    const auto width = state->exact_surface_width.load();
-                    const auto height = state->exact_surface_height.load();
-                    if (width && height) ratio = static_cast<double>(width) / height;
-                }
-            }
-            const auto dpi = GetDpiForWindow(window);
-            RECT border{};
-            AdjustWindowRectExForDpi(&border,
-                static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE)),
-                FALSE, 0, dpi);
-            const auto border_width = border.right - border.left;
-            const auto border_height = border.bottom - border.top;
-            auto& bounds = *reinterpret_cast<RECT*>(lparam);
-            const auto width = bounds.right - bounds.left - border_width;
-            const auto height = bounds.bottom - bounds.top - border_height;
-            // Project the cursor's proposed client size onto the aspect diagonal.
-            const auto min_height = std::max(
-                static_cast<double>(MulDiv(270, static_cast<int>(dpi), 96)),
-                MulDiv(480, static_cast<int>(dpi), 96) / ratio);
-            const auto fitted_height = std::max(min_height,
-                (static_cast<double>(width) * ratio + height) / (ratio * ratio + 1.0));
-            const auto outer_width = static_cast<LONG>(std::lround(fitted_height * ratio)) + border_width;
-            const auto outer_height = static_cast<LONG>(std::lround(fitted_height)) + border_height;
-            if (wparam == WMSZ_TOPLEFT || wparam == WMSZ_BOTTOMLEFT)
-                bounds.left = bounds.right - outer_width;
-            else bounds.right = bounds.left + outer_width;
-            if (wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT)
-                bounds.top = bounds.bottom - outer_height;
-            else bounds.bottom = bounds.top + outer_height;
-            return TRUE;
         }
         case WM_SIZE:
             if (state != nullptr && wparam != SIZE_MINIMIZED) {

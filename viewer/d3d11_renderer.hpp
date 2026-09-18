@@ -56,6 +56,9 @@ public:
     [[nodiscard]] D3D11RenderReceipt render_persistent(
         HWND window,
         const platform::windows::WindowsNv12Frame& frame);
+    // Present the last committed texture after a window resize without
+    // advancing the visual generation or re-decoding an obsolete video frame.
+    [[nodiscard]] bool present_framebuffer(HWND window);
     void begin_framebuffer_update();
     void patch_bgra(
         std::uint32_t x, std::uint32_t y,

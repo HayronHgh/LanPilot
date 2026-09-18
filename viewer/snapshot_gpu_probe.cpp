@@ -31,6 +31,18 @@ int main() {
         const auto original = renderer.committed_framebuffer_bgra();
         if (original != pixels) throw std::runtime_error("cold snapshot pixel mismatch");
         std::cout << "cold_snapshot=PASS video_seed=0 mismatch_bytes=0\n";
+        // A resize never needs a new visual packet. The committed pixels stay
+        // intact while the swap chain follows wide, tall and maximized shapes.
+        for (const auto& [width, height] : {
+                 std::pair{800, 600}, std::pair{600, 900},
+                 std::pair{1440, 900}, std::pair{2560, 1440}}) {
+            if (!SetWindowPos(window, nullptr, 0, 0, width, height,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) ||
+                !renderer.present_framebuffer(window) ||
+                renderer.committed_framebuffer_bgra() != original)
+                throw std::runtime_error("resize changed or failed to present committed pixels");
+        }
+        std::cout << "resize_represent=PASS sizes=4 new_visual_packets=0 mismatch_bytes=0\n";
         for (std::size_t i = 0; i < pixels.size(); i += 4) pixels[i] ^= std::byte{127};
         bool resize_rejected = false;
         try { renderer.begin_full_snapshot(1280, 720); }

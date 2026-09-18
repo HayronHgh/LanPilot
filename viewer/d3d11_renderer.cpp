@@ -72,6 +72,20 @@ public:
         return device_.Get();
     }
 
+    [[nodiscard]] bool present_framebuffer(const HWND window) {
+        if (!framebuffer_initialized_) return false;
+        RECT client{};
+        GetClientRect(window, &client);
+        const auto width = static_cast<std::uint32_t>(
+            std::max<LONG>(1, client.right - client.left));
+        const auto height = static_cast<std::uint32_t>(
+            std::max<LONG>(1, client.bottom - client.top));
+        ensure_swap_chain(width, height);
+        ensure_persistent_pipeline(surface_width_, surface_height_, width, height);
+        static_cast<void>(present_committed(width, height));
+        return true;
+    }
+
     void render(
         const HWND window,
         const platform::windows::WindowsNv12Frame& frame) {
@@ -799,8 +813,13 @@ private:
         const D3D11_VIDEO_COLOR black{};
         video_context_->VideoProcessorSetOutputBackgroundColor(
             processor, FALSE, &black);
+        D3D11_TEXTURE2D_DESC output_texture_description{};
+        output_texture->GetDesc(&output_texture_description);
+        const RECT target{
+            0, 0, static_cast<LONG>(output_texture_description.Width),
+            static_cast<LONG>(output_texture_description.Height)};
         video_context_->VideoProcessorSetOutputTargetRect(
-            processor, TRUE, &destination);
+            processor, TRUE, &target);
         video_context_->VideoProcessorSetStreamSourceRect(
             processor, 0, TRUE, &source);
         video_context_->VideoProcessorSetStreamDestRect(
@@ -933,6 +952,9 @@ D3D11RenderReceipt D3D11Nv12Renderer::render_persistent(
     const HWND window,
     const platform::windows::WindowsNv12Frame& frame) {
     return impl_->render_persistent(window, frame);
+}
+bool D3D11Nv12Renderer::present_framebuffer(const HWND window) {
+    return impl_->present_framebuffer(window);
 }
 void D3D11Nv12Renderer::begin_framebuffer_update() {
     impl_->begin_framebuffer_update();
