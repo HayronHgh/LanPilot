@@ -40,6 +40,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\Install-DesktopPreview
 
 開啟桌面 Remote Workspace 捷徑，填入 Mac 位址、帳號、私鑰及 agent 完整路徑。
 新設定預設 View only；需要鍵鼠控制時明確選擇 Control keyboard and mouse。
+
+### 實驗版獨立 TLS 啟動器（非預設）
+
+套件另附 `bin/Start-LanPilotTls.ps1` 與 `TlsConnectionSettings.psm1`。
+只有兩端均部署相容的 LPA1 握手版本、並已完成憑證配對時才使用。
+可直接執行 TLS 啟動器，或在安裝時明確指定 `-Transport tls`，讓同一個捷徑指向它；
+未指定時仍使用 SSH。這不會建立金鑰、安裝 CA、修改防火牆或啟動 Mac 服務。
+
+TLS 設定保存於 `%LOCALAPPDATA%\LanPilot\tls-desktop.json`，與 SSH 設定分開；
+預設 view-only/H.264。`-ConnectImmediately` 使用已存設定，`-ValidateOnly` 僅檢查設定格式，
+不等於憑證驗證或連線成功。解除安裝保留 TLS 設定，亦不移除憑證或 SSH 金鑰。
+正式憑證配置與自動啟動服務尚未整合，此入口不是一鍵部署完成的宣告。
 預設 H.264 低延遲模式與 Fit 等比例置中。縮放不會提高 Mac 原始解析度。
 緊急退出：Ctrl+Alt+Shift+F12。
 

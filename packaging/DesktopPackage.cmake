@@ -6,6 +6,8 @@ if(WIN32 AND TARGET rwn-viewer)
   install(PROGRAMS
     "${PROJECT_SOURCE_DIR}/packaging/windows/Install-DesktopPreview.ps1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Start-DesktopPreview.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Start-LanPilotTls.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/TlsConnectionSettings.psm1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Uninstall-DesktopPreview.ps1"
     DESTINATION bin COMPONENT desktop EXCLUDE_FROM_ALL)
 elseif(APPLE AND TARGET rwn-desktop-agent)

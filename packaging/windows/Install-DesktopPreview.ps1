@@ -9,6 +9,9 @@ param(
     [ValidateSet('h264', 'snapshot-only', 'raw-rect-experimental')]
     [string]$Hybrid = 'h264',
 
+    [ValidateSet('ssh','tls')]
+    [string]$Transport = 'ssh',
+
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\RemoteWorkspaceNode'),
     [string]$ConfigRoot = (Join-Path $env:LOCALAPPDATA 'RemoteWorkspaceNode'),
     [switch]$ForceConfig
@@ -49,14 +52,17 @@ if ($HostName -or $SshKey -or $RemoteAgent) {
 $sourceViewer = Join-Path $PSScriptRoot 'rwn-viewer.exe'
 $sourceLauncher = Join-Path $PSScriptRoot 'Start-DesktopPreview.ps1'
 $sourceUninstaller = Join-Path $PSScriptRoot 'Uninstall-DesktopPreview.ps1'
-foreach ($source in @($sourceViewer, $sourceLauncher, $sourceUninstaller)) {
+$sourceTlsLauncher = Join-Path $PSScriptRoot 'Start-LanPilotTls.ps1'
+$sourceTlsSettings = Join-Path $PSScriptRoot 'TlsConnectionSettings.psm1'
+$sources=@($sourceViewer, $sourceLauncher, $sourceUninstaller, $sourceTlsLauncher, $sourceTlsSettings)
+foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Release package is incomplete: $source"
     }
 }
 
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-foreach ($source in @($sourceViewer, $sourceLauncher, $sourceUninstaller)) {
+foreach ($source in $sources) {
     $destination = Join-Path $InstallRoot ([IO.Path]::GetFileName($source))
     $temporary = "$destination.new"
     Copy-Item -LiteralPath $source -Destination $temporary -Force
@@ -84,6 +90,7 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $launcher = Join-Path $InstallRoot 'Start-DesktopPreview.ps1'
+if ($Transport -eq 'tls') { $launcher = Join-Path $InstallRoot 'Start-LanPilotTls.ps1' }
 $shortcut.Arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
 $shortcut.WorkingDirectory = $InstallRoot
 $shortcut.Description = 'Configure and connect to a Remote Workspace Mac'
@@ -94,3 +101,7 @@ Write-Host "Installed: $InstallRoot"
 Write-Host "Configuration: $configPath"
 Write-Host "Shortcut: $shortcutPath"
 Write-Host 'The default mode is h264 until Hybrid promotion evidence passes.'
+if ($Transport -eq 'tls') {
+    Write-Host 'Experimental TLS launcher selected. Paired identities, CA and CRL are prerequisites; none were provisioned.'
+    Write-Host 'TLS profile is separate under LOCALAPPDATA\LanPilot and is retained by uninstall.'
+}
