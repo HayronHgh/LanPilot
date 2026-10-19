@@ -24,6 +24,9 @@ TLS TCP socket，Agent 維持 SSH；舊版 SSH 桌面路徑保留。
 可審查的 commit，不逐一發布開發快照，也不匯入私人研究歷史。
 目前進度與最短發布路徑見 [發布就緒報告](doc/release-readiness.md)。
 
+連線維護的現況、背景續期設計與逐步驗收，見 [可視化持續性路線圖](doc/connection-reliability.zh-TW.md)。
+文件區分公開程式、本機開發驗證與尚待實作的功能。
+
 ## 安裝兩端
 
 以下是 **v0.1／v0.2 SSH 預覽安裝方式**，不是 v0.3 一鍵 TLS 配對流程。

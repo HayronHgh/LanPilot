@@ -14,6 +14,8 @@ The Windows viewer keeps the remote image centered and proportional when its win
 
 These lines describe the project's evolution. They are not downloadable release tags. A signed installer, first-time pairing flow, and final two-host acceptance are still in progress. See [release readiness](doc/release-readiness.md).
 
+The [connection reliability roadmap](doc/connection-reliability.md) diagrams the channel architecture, current renewal failure path, planned recovery states, and review gates. It distinguishes published code from installed development results and future work.
+
 ## Build and verify
 
 Use CMake 3.25 or newer, a C++23 compiler, and the native SDK for the target operating system. Build each platform on its own machine:
