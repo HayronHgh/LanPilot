@@ -2,7 +2,7 @@
 
 [架構與收斂決策](doc/architecture.md) · [工程學習與技術答辯](doc/engineering-study-guide.zh-TW.md)
 
-![桌面 Session 與按需 SSH 工作連線](doc/assets/lanpilot-architecture.svg)
+![LanPilot：區域網路上的跨裝置桌面](doc/assets/lanpilot-cover.png)
 
 [English README](README.en.md)
 

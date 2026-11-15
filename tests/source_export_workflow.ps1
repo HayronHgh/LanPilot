@@ -23,6 +23,11 @@ try {
     $null=New-Item -ItemType Directory -Path $source
     foreach($folder in $catalog.Folders){$null=New-Item -ItemType Directory -Path (Join-Path $source $folder) -Force}
     foreach($file in $catalog.Files){Put $file "# LanPilot source fixture`n"}
+    $png=[Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6ioAAAAASUVORK5CYII=')
+    foreach($file in $catalog.BinaryFiles){
+        Put $file ''
+        [IO.File]::WriteAllBytes((Join-Path $source $file),$png)
+    }
     Put 'core/fixture.cpp' "// exact public bytes`n"
     Put 'tests/CMakeLists.txt' '# fixture'
     $packageOutput='set(CPACK_PACKAGE_DIRECTORY "${PROJECT_SOURCE_DIR}/out/packages")'
@@ -67,6 +72,12 @@ try {
     Reject {Export-LanPilotPublicSource $source 'relative'}
 
     $rejected=Join-Path $source 'out/rejected'
+    foreach($file in $catalog.BinaryFiles){
+        Put $file 'not a PNG'
+        Reject {Export-LanPilotPublicSource $source $rejected}
+        Check (-not (Test-Path -LiteralPath $rejected)) 'Invalid artwork wrote output'
+        [IO.File]::WriteAllBytes((Join-Path $source $file),$png)
+    }
     Put 'core/fixture.cpp' 'PRIVATE_WORKFLOW_PERSON'
     Reject {Export-LanPilotPublicSource $source $rejected -ForbiddenTokens @('PRIVATE_WORKFLOW_PERSON')}
     Check (-not (Test-Path -LiteralPath $rejected)) 'Privacy failure wrote output'

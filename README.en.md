@@ -2,7 +2,7 @@
 
 [Architecture and simplification decision](doc/architecture.md) · [Engineering study guide (繁體中文)](doc/engineering-study-guide.zh-TW.md)
 
-![Desktop session and optional SSH workspace](doc/assets/lanpilot-architecture.svg)
+![LanPilot — connected desktops over your local network](doc/assets/lanpilot-cover.png)
 
 Installation and persistent in-place updates are being consolidated. See the
 [current product status and acceptance gates](doc/product-status.md).

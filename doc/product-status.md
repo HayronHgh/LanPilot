@@ -1,43 +1,66 @@
 # Product status
 
-LanPilot is a development project for Windows-to-Mac desktop access on a LAN.
-Other host/client directions are not implemented. The supported release target
-is one application per computer, one remembered connection and updates which
-preserve protected identity and settings. That target has not passed acceptance.
+Updated 2026-11-15. LanPilot currently targets Windows-to-Mac LAN desktop access.
+Other host/client directions are not implemented. This page is the current
+documentation route; older dated reports describe their own source and runs.
 
-| Area | Implemented | Still required before a production release |
+The product direction is **one remembered desktop connection, with optional SSH
+workspace access**. Visual and control TLS sockets are internal parts of the same
+desktop session. See the [architecture decision](architecture.md) and
+[engineering study guide](engineering-study-guide.zh-TW.md).
+
+## What is present, and what is not yet accepted
+
+| Area | In the source | Remaining acceptance |
 | --- | --- | --- |
-| Visual/control | H.264, exact snapshots/rectangles, separate TLS visual/control sockets; SSH agent access | Two-host final regression and documented mode selection |
-| Windows product | Fixed native launcher, remembered settings, windowless maintenance and recoverable local program transactions | Authenticated bootstrap/runtime update and clean-user acceptance |
-| Mac product | Canonical application, explicit native consent UI, protected configuration, login ownership and shutdown receipts | Developer ID signing/notarization, actual service migration and permission continuity |
-| Identity | Protected native keys, native association, write-ahead recovery, signed durable two-end completion and native remembered-configuration handoff | First-run transport/UI, recovery integration and certificate renewal |
-| Updates | Shared release verification plus bounded staging/recovery primitives | Pinned production release key, real activation/health/rollback integration |
-| Distribution | Source selection excludes local history/builds and writes a hash inventory | Reproducible clean builds and signed, accepted installation packages |
+| Desktop | H.264, snapshot/RECT state transactions, persistent GPU framebuffer, independent visual/control TLS | Same-candidate two-host regression, mode-selection evidence, soak and physical latency comparison |
+| Input | Keyboard/mouse, local cursor, focus/disconnect release; Mac native IME path | Current installed pair's manual click/drag/shortcut/IME matrix |
+| Clipboard | Opt-in bidirectional text synchronization | Installed-pair manual validation; image/file clipboard is not provided |
+| Windows app | Fixed GUI launcher, offline setup, remembered profile, background maintenance, recoverable updates, bounded reconnect | Current-pair installation/reinstall/update/rollback and close-without-residue acceptance |
+| Mac app | Native application/setup, protected configuration, service ownership, shutdown/update recovery, native Installer packaging | Actual canonical service migration, consent and update continuity; no claim that source-only tests prove these |
+| Identity | Native keys, explicit pairing protocol/UI, durable recovery, signed status and credential renewal | Full clean-account pairing and long-lived recovery through the actual installed products |
+| Distribution | Allowlisted source export; Windows setup and Mac native/personal package builders | Platform CI, matched deliverables, operational acceptance; signed public distribution remains separate |
+| Workspace/Agent | Existing independent SSH access; workspace/build/artifact modules | An integrated scoped Agent product; SSH authentication alone does not establish tool authorization |
 
-Automating setup does not silently grant macOS Screen Recording or Accessibility.
-The foreground application must guide native consent. View-only connections
-must not acquire control or clipboard permission implicitly. Existing keys and
-settings must survive updates; no developer identity/profile is shipped to users.
+The [personal installers](personal-installers.md) are for an **existing paired
+Windows/Mac installation**. They do not provision a new user's identity, eliminate
+native OS permission prompts, or constitute a signed public release. This
+personal route does not require buying an Apple membership before testing; it
+also does not disable trust, Keychain, TCC or publisher checks in other routes.
 
-Acceptance includes clean Windows/Mac accounts, first pairing, remembered second
-launch, restart/login, two consecutive signed upgrades, interrupted-update
-recovery, sleep/offline return, device-certificate lifecycle and safe removal of
-legacy programs only after the canonical installation works. Unit tests and a
-source inventory do not prove those operational requirements.
+## Candidate evidence
 
-## Buildable source, not local deployment state
+The 2026-11-15 clean export contains 411 source/resource files. Its Windows GNU
+Release build completed all 182 build actions; CTest passed 24/24 in 46.61 seconds.
+The source-export workflow passed deterministic hashes, known-private-marker
+rejection, dependency checks and linked-path rejection. Mac installer presentation
+generation was reproduced as failing in the old export and passing with the two
+HTML resources included. The architecture SVG was rendered and visually checked.
 
-Use a native C++23 compiler and CMake on each platform. Presets use the compiler
-from the configured environment; no developer-specific compiler path is required.
+Those results belong to the exported candidate used for public source convergence,
+not every historical release. GitHub CI must validate the actual public commit
+on Windows/MSVC and macOS. Native macOS package execution, installed desktop
+behavior, input, clipboard and soak were **not tested in this run**. The portable
+presentation check is not a substitute for the macOS installer workflow.
 
-The publication helper creates a new source-only directory under project out/.
-It excludes Git history, local build/install trees, personal profiles and key
-files. Its explicit script/resource catalog must include all CMake test/package
-dependencies. It validates content before writing and creates source-manifest.json
-last, containing relative paths, byte sizes and SHA-256 hashes. The inventory
-provides integrity and reproducibility, **not publisher authentication**.
+The public candidate is a review branch, not a release tag. See
+[release convergence](release-convergence.md) for the remaining gates. Do not
+reuse historical screenshot timings as current benchmark results.
 
-Research history and machine-specific diagnostics remain local. Development
-source is not a signed installer, and the v0.1/v0.2/v0.3 evolution is not proof
-that three accepted release packages exist. See [release readiness](release-readiness.md)
-and the [public build guide](public-guide.md).
+## Source and state ownership
+
+Publish only the explicit `packaging/SourceExport.psm1` selection. Build and test
+from that export before creating platform packages. The selection includes
+runtime installer resources, not just C++ files and CMake inputs. No personal
+profiles, private keys, build directories or private Git history are copied.
+The generated SHA-256 inventory proves content integrity, not publisher identity.
+
+Installed program files are replaceable; device identities and remembered
+settings have different ownership and must survive an update. Remove a legacy
+installation only after replacement and rollback have been verified. No cleanup
+step may silently reset permissions or delete the user's paired devices.
+
+For installation routes use the [documentation index](README.md); for production
+gates use [install-once acceptance](install-once-release-acceptance.md). The
+historical [version lines](public-releases.md) describe v0.1/v0.2/v0.3 evolution,
+not three currently accepted downloadable installers.

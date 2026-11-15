@@ -45,7 +45,8 @@ function Get-LanPilotSourceCatalog {
             'packaging/macos/personal-resources/welcome.html',
             'packaging/macos/personal-resources/conclusion.html',
             'doc/architecture.md','doc/engineering-study-guide.zh-TW.md',
-            'doc/assets/lanpilot-architecture.svg',
+            'doc/assets/lanpilot-architecture.svg','doc/assets/README.md',
+            'doc/README.md','doc/release-convergence.md',
             'packaging/macos/LanPilot-Authorize.command','packaging/macos/New-LanPilotLaunchAgent.ps1',
             'packaging/macos/check-tls-resources.sh','packaging/macos/import-tls-identity.sh',
             'packaging/macos/install-tls-service.sh','packaging/macos/prepare-tls-identity.sh',
@@ -55,6 +56,9 @@ function Get-LanPilotSourceCatalog {
             'tests/lanpilot_product_layout_workflow.ps1','tests/trust_renewal_workflow.ps1',
             'tests/background_trust_workflow.ps1','tests/source_export_workflow.ps1',
             'tests/mac_launch_agent_workflow.ps1','tests/mac_tls_resources_workflow.sh')
+        # Only reviewed publication artwork is binary; never select arbitrary
+        # images, archives or credentials by extension.
+        BinaryFiles=[string[]]@('doc/assets/lanpilot-cover.png')
         Folders=[string[]]@('audio','broker','build-worker','client','config','core','desktop','desktop-agent',
             'node','platform','protocol','tests','tools','transport','viewer')
         Extensions=[string[]]@('.cpp','.hpp','.h','.mm','.proto','.cmake','.toml','.tsv')
@@ -70,7 +74,7 @@ function Assert-LanPilotSourceDirectory([string]$Path) {
 function Get-LanPilotSourceSelection([string]$Root) {
     $catalog=Get-LanPilotSourceCatalog
     $paths=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
-    foreach($relative in $catalog.Files){$null=$paths.Add($relative)}
+    foreach($relative in @($catalog.Files)+@($catalog.BinaryFiles)){$null=$paths.Add($relative)}
     foreach($folder in $catalog.Folders){
         $pending=[Collections.Generic.Queue[string]]::new();$pending.Enqueue((Join-Path $Root $folder))
         while($pending.Count){
@@ -118,6 +122,7 @@ function Export-LanPilotPublicSource {
             if($cursor -eq [IO.Path]::GetPathRoot($cursor)){break}
         }
     }
+    $catalog=Get-LanPilotSourceCatalog
     $selected=Get-LanPilotSourceSelection $root
     if($selected.Count -gt 2048){throw 'Source file count exceeds publication bounds.'}
     $snapshot=[Collections.Generic.List[object]]::new();[long]$total=0
@@ -137,7 +142,14 @@ function Export-LanPilotPublicSource {
         if($file.Length -gt 8MB){throw 'Source file exceeds publication bounds.'}
         $bytes=[IO.File]::ReadAllBytes($file.FullName)
         if($bytes.Length -gt 8MB -or $total+$bytes.Length -gt 64MB){throw 'Source snapshot exceeds publication bounds.'}
-        $text=$utf8.GetString($bytes)
+        if($relative -in $catalog.BinaryFiles){
+            if($bytes.Length -lt 8 -or [BitConverter]::ToString($bytes,0,8) -cne '89-50-4E-47-0D-0A-1A-0A'){
+                throw 'Publication artwork must have a PNG signature.'
+            }
+            # Scan uncompressed metadata markers; rendered content still
+            # requires human review. This is not an image privacy detector.
+            $text=[Text.Encoding]::ASCII.GetString($bytes)
+        }else{$text=$utf8.GetString($bytes)}
         foreach($token in $ForbiddenTokens){
             if($token -and $text.IndexOf($token,[StringComparison]::OrdinalIgnoreCase) -ge 0){throw "Private marker found in $relative"}
         }
