@@ -37,20 +37,41 @@ also does not disable trust, Keychain, TCC or publisher checks in other routes.
 
 ## Candidate evidence
 
-The initial 2026-11-15 clean export contained 411 source/resource files; adding
-the reviewed cover and documentation brings the selection to 415. The Windows GNU
-Release build completed all 182 build actions; CTest passed 24/24 in 46.61 seconds.
-The source-export workflow passed deterministic hashes, known-private-marker
-rejection, dependency checks and linked-path rejection. Mac installer presentation
-generation was reproduced as failing in the old export and passing with the two
-HTML resources included. The architecture SVG was rendered and visually checked.
+The 0.3.0 package source at `c1ce3e1800985d6dd639a1c349b0480ae00a01b6`
+passed Windows/MSVC 25/25 and Mac universal2 26/26 tests, plus the platform TLS
+checks, in [run 43670546922](https://github.com/HayronHgh/LanPilot/actions/runs/43670546922).
+The local Windows GNU Release build also passed 25/25 tests. The clean export
+contains 416 selected files with verified SHA-256 correspondence; private-marker,
+linked-path and dependency checks passed.
 
-GitHub [run 43668835646](https://github.com/HayronHgh/LanPilot/actions/runs/43668835646)
-passed Windows/MSVC and Mac universal2 build/CTest, plus the platform TLS checks,
-for `825edecbad66927964ee05b36cde177e82cd3707`. It includes the launcher regression
-fix: explicit SSH uses the selected LanPilot settings root; default TLS routing
-and saved profile bytes are unchanged. Native Mac installer workflow tests also
-ran in CI, including the previously missing presentation resources.
+The package workflow builds and stages the real platform installer, checks that
+the product bundle contains only installer/README/LICENSE, and verifies that
+explicit `desktop-compat` tools remain available. Mac CI built the actual native
+`.pkg`; that unsigned package still does not bypass native activation policy.
+Missing installer presentation resources and the SSH selected-settings-root
+regression were reproduced and repaired in earlier commits. Cover and architecture
+artwork were visually checked.
+
+## Existing-pair package preflight
+
+On 2026-11-15, private personal installers were built from the identified packaging
+source while preserving the installed stable Viewer/agent bytes. Windows package,
+existing-identity and bootstrap/runtime integrity checks passed. The Mac package
+was expanded, its two-file payload and exact executable hash verified, and its
+actual read-only preinstall guard passed. Five negative package guards passed in
+isolated fixtures. No keys or connection profile were bundled.
+
+Two real LAN TLS handshakes passed with the native certificate, peer-pin and
+revocation checks. The probe sent no application bytes, admitted no desktop role,
+read no desktop payload and sent no input. Installed profiles, agent bytes and
+service configuration remained unchanged.
+
+These private artifacts are for the existing pair, not public downloads. The
+packaging commit identifies the installer implementation; it does **not** prove
+that the frozen installed streaming executables were rebuilt from that commit.
+See [artifact provenance](personal-installers.md#artifact-provenance-and-acceptance)
+for the required separate records. Actual user installation, control and reopen
+acceptance of these delivered artifacts remains pending.
 
 These results belong to the identified source, not every historical release.
 Live installed desktop behavior, input, clipboard and soak were **not retested in

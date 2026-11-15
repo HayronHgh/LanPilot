@@ -235,6 +235,13 @@ manifest 只能證明內容一致，不能取代發布者簽章。
 封裝、migration/rollback dependency；先驗證替代路徑，再移除 legacy。不要為了
 「看起來乾淨」刪掉仍被個人安裝器使用的相容服務。
 
+**問：安裝器來自 commit X，就能說裡面的程式也來自 X 嗎？**
+
+不能。自用包可能保留已測穩定的 Viewer／agent，只重建 installer。必須分別
+記錄封裝原始碼 commit、安裝器 SHA-256、內嵌 runtime SHA-256，以及 runtime
+自己的建置來源；不知道最後一項就明說不知道。雜湊相同能證明 bytes 沒被換掉，
+不能反推出原始碼版本。TLS 握手通過也不能代替安裝後的畫面／輸入驗收。
+
 ## 一週學習路線與實作練習
 
 1. **資料流：**畫一次 frame 與 click 的完整路徑，標 owner、thread、queue、clock。

@@ -75,3 +75,23 @@ Actual saved-identity readiness and two direct TLS handshakes can be checked
 without sending application role headers, desktop pixels, input or clipboard.
 Those probes do not prove that pixels/rendering or user interaction passed;
 the real installed connection remains a final user acceptance test.
+
+## Artifact provenance and acceptance
+
+Keep separate records for the packaging-source commit, installer SHA-256, embedded
+Viewer/agent SHA-256 and, on Mac, the service-configuration binding. A personal
+package may reuse a stable installed executable. Do not label that executable as
+rebuilt from the packaging commit unless source/build provenance independently
+proves it. Package version, source revision and runtime identity are different facts.
+
+Before delivery, verify the actual archive inventory and runtime hashes, run the
+Windows `--check-package` / `--check-existing-pair` modes and the Mac read-only
+preinstall guard, and confirm installed state was not changed. A handshake-only
+probe must retain the native peer/trust/revocation checks, send no role-admission
+header or application bytes and avoid desktop/input/clipboard access.
+
+Those checks establish package integrity and connection prerequisites, not an
+installed session. The owner still verifies installation, Connect, keyboard/mouse
+and close/reopen. Keep that result separate from automated tests. Do not remove
+the previous working installation or publish a personal artifact as a generic
+release while this acceptance is missing.
