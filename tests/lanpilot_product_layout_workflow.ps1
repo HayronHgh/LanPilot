@@ -37,7 +37,39 @@ try {
     if($LASTEXITCODE){throw 'Idempotent product layout check failed'}
     if(@(Get-ChildItem -LiteralPath (Join-Path $testRoot 'maintenance') -Directory -Filter 'legacy-profile-*').Count -ne 1){throw 'Idempotent launch created another archive'}
     if(@(Get-ChildItem -LiteralPath $testRoot -Recurse -File -Filter '*.tmp').Count){throw 'Migration leaked temporary files'}
-    Write-Output 'lanpilot_product_layout_workflow=PASS canonical_profile=1 recovery=1 archive=1 idempotent=1 desktop_artifacts=0'
+    # Exercise the actual unified entry with inert neighboring transports.
+    # No real Viewer/SSH process, UI, key store or network is opened.
+    $dispatch=Join-Path $testRoot 'dispatch';$null=New-Item -ItemType Directory -Path $dispatch
+    $entry=Join-Path $dispatch 'Start-LanPilot.ps1'
+    Copy-Item -LiteralPath $launcher -Destination $entry
+    $receipt=Join-Path $dispatch 'route.json'
+    [IO.File]::WriteAllText((Join-Path $dispatch 'Start-DesktopPreview.ps1'),@'
+param([string]$ConfigPath='legacy-default')
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'route.json'),
+    (@{transport='ssh';profile=$ConfigPath}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+'@)
+    [IO.File]::WriteAllText((Join-Path $dispatch 'Start-LanPilotTls.ps1'),@'
+param([string]$ConfigPath,[string]$ViewerPath,[switch]$ConnectImmediately,[switch]$CheckLayout)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'route.json'),
+    (@{transport='tls';profile=$ConfigPath;immediate=[bool]$ConnectImmediately}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+'@)
+    $sshProfile=Join-Path $testRoot 'desktop.json'
+    [IO.File]::WriteAllText($sshProfile,'{"opaque":"retained-ssh-settings"}')
+    $sshHash=Get-Sha256 $sshProfile
+    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -DataRoot $testRoot -Connection ssh
+    if($LASTEXITCODE){throw 'SSH dispatch failed'}
+    $route=Get-Content -Raw -LiteralPath $receipt|ConvertFrom-Json
+    if($route.transport -cne 'ssh' -or $route.profile -cne $sshProfile){throw 'SSH ignored the selected LanPilot data root'}
+    foreach($mode in @('configure','tls')){
+        & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -DataRoot $testRoot -Connection $mode
+        if($LASTEXITCODE){throw 'TLS dispatch failed'}
+        $route=Get-Content -Raw -LiteralPath $receipt|ConvertFrom-Json
+        if($route.transport -cne 'tls' -or $route.profile -cne $profile -or $route.immediate -ne ($mode -ceq 'tls')){
+            throw 'TLS setup/connect dispatch changed'
+        }
+    }
+    if((Get-Sha256 $sshProfile) -cne $sshHash -or (Get-Sha256 $profile) -cne $legacyHash){throw 'Dispatch changed saved settings'}
+    Write-Output 'lanpilot_product_layout_workflow=PASS canonical_profile=1 recovery=1 archive=1 idempotent=1 dispatch=1 settings_preserved=1 desktop_artifacts=0'
 } finally {
     if(Test-Path -LiteralPath $testRoot){Remove-Item -LiteralPath $testRoot -Recurse -Force}
 }

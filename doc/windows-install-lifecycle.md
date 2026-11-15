@@ -23,6 +23,25 @@ All installer configuration, shortcut, Apps registration and maintenance-task
 writes run inside the activation callback while installation ownership is held.
 An identical package still reconciles bindings without rewriting program bytes.
 
+## One connection entry and selected settings root
+
+The installed launcher opens the TLS connection form directly. The obsolete
+version/transport chooser is removed from the internal script; advanced SSH
+remains explicit through `LanPilot.exe --connection ssh`. Both routes honor
+the same selected data root: TLS uses `connections/default.json`, while the
+retained SSH profile uses `desktop.json`. They are distinct profile schemas,
+not interchangeable trust or permission records.
+
+Previously the unified launcher did not pass a profile path to the legacy SSH
+script, so that script silently read its old `RemoteWorkspaceNode` default.
+The workflow regression reproduces that mismatch using the real launcher and
+inert neighboring transports. It now verifies the selected SSH path, TLS
+settings/direct-connect routing and unchanged profile hashes. No real Viewer,
+SSH connection, OS input or clipboard is involved in this test.
+
+This changes source routing, not existing device trust or installed service
+ownership. Old SSH profiles are not automatically deleted or merged into TLS.
+
 ## Removal transaction
 
 The public uninstaller accepts only the canonical per-user program root. Before
