@@ -10,15 +10,20 @@ permissions:
 jobs:
   build-test:
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
+      - name: Configure Windows
+        if: runner.os == 'Windows'
         run: cmake -S . -B build -DRWN_BUILD_TESTS=ON
+      - name: Configure macOS universal2
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DRWN_BUILD_TESTS=ON "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
       - name: Build
-        run: cmake --build build --config Debug
+        run: cmake --build build --config Debug --parallel 4
       - name: Workflow unit and security tests
         run: ctest --test-dir build -C Debug --output-on-failure
       - name: TLS setup workflow checks (no network or identity-store writes)
