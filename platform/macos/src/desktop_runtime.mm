@@ -2423,16 +2423,33 @@ void MacosInputBackend::pointer_wheel(
 }
 
 std::string MacosClipboardBackend::read_utf8_text() {
+    return read_available_utf8_text().value_or(std::string{});
+}
+
+std::uint64_t MacosClipboardBackend::change_token() const {
+    @autoreleasepool {return static_cast<std::uint64_t>([NSPasteboard generalPasteboard].changeCount);}
+}
+
+std::optional<std::string> MacosClipboardBackend::read_available_utf8_text() {
     @autoreleasepool {
+        auto pasteboard=[NSPasteboard generalPasteboard];
+        if([[pasteboard types] containsObject:NSPasteboardTypeFileURL] ||
+           [[pasteboard types] containsObject:@"org.nspasteboard.ConcealedType"] ||
+           [[pasteboard types] containsObject:@"org.nspasteboard.TransientType"])return std::nullopt;
         NSString* value = [[NSPasteboard generalPasteboard]
             stringForType:NSPasteboardTypeString];
-        return value == nil ? std::string{} : std::string(value.UTF8String);
+        if(value==nil)return std::nullopt;
+        if([value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>desktop::maximum_clipboard_text_size)
+            throw std::runtime_error("clipboard text exceeds bounds");
+        NSData* bytes=[value dataUsingEncoding:NSUTF8StringEncoding];
+        if(!bytes)throw std::runtime_error("clipboard text encoding unavailable");
+        return std::string(static_cast<const char*>(bytes.bytes),bytes.length);
     }
 }
 
 void MacosClipboardBackend::write_utf8_text(const std::string_view text) {
     if (!desktop::valid_utf8(text) ||
-        text.size() > desktop::maximum_clipboard_text_size) {
+        text.size() > desktop::maximum_clipboard_text_size || text.find('\0')!=std::string_view::npos) {
         throw std::invalid_argument("invalid UTF-8 clipboard text");
     }
     @autoreleasepool {

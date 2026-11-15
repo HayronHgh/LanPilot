@@ -7,9 +7,11 @@ function Assert-LanPilotLocalPath([string]$Path) {
 
 function Get-LanPilotTlsArguments($Settings) {
     $names=@('schema','transport','host','port','clientCertificate','serverFingerprint','rootDer','crlDer','control','visual')
+    if($Settings.schema -eq 2){$names+=@('status')}
     foreach($name in $Settings.PSObject.Properties.Name){if($name -cnotin $names){throw 'Unknown TLS setting.'}}
     foreach($name in $names){if($name -cnotin $Settings.PSObject.Properties.Name){throw "Missing TLS setting: $name"}}
-    if(($Settings.schema -isnot [int] -and $Settings.schema -isnot [long]) -or $Settings.schema -ne 1 -or $Settings.transport -cne 'tls'){throw 'Unsupported TLS profile schema.'}
+    if(($Settings.schema -isnot [int] -and $Settings.schema -isnot [long]) -or $Settings.schema -notin @(1,2) -or $Settings.transport -cne 'tls'){throw 'Unsupported TLS profile schema.'}
+    if($Settings.schema -eq 2 -and ($Settings.status -isnot [string] -or $Settings.status -cne 'native')){throw 'Native profiles require native revocation refresh.'}
     foreach($name in @('host','clientCertificate','serverFingerprint','rootDer','crlDer','control','visual')){
         if($Settings.$name -isnot [string]){throw "TLS setting must be text: $name"}
     }
@@ -24,8 +26,10 @@ function Get-LanPilotTlsArguments($Settings) {
     if($Settings.control -cnotin @('view-only','interactive') -or $Settings.visual -cnotin @('h264-only','exact-only')){throw 'Invalid control or visual mode.'}
     # This validates configuration only. Viewer still verifies certificates,
     # revocation, hostname, paired fingerprint and server-granted input rights.
-    return @('--tls',$Settings.host,[string]$Settings.port,$Settings.clientCertificate,
+    $arguments=@('--tls',$Settings.host,[string]$Settings.port,$Settings.clientCertificate,
         $Settings.serverFingerprint,$Settings.rootDer,$Settings.crlDer,$Settings.control,$Settings.visual)
+    if($Settings.schema -eq 2){$arguments+=@('--native-status','required')}
+    return $arguments
 }
 
 function Read-LanPilotTlsSettings([string]$Path) {
@@ -50,11 +54,11 @@ function Save-LanPilotTlsSettings([string]$Path,$Settings) {
 }
 function Assert-LanPilotClientIdentity {
     param([Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
-          [DateTime]$NowUtc=[DateTime]::UtcNow)
+          [DateTime]$NowUtc=[DateTime]::UtcNow,[switch]$AllowNativeRenewal)
     if($null -eq $Certificate){throw 'Client certificate was not found in CurrentUser/My.'}
     if(-not $Certificate.HasPrivateKey){throw 'Client certificate has no associated private key.'}
     if($NowUtc -lt $Certificate.NotBefore.ToUniversalTime() -or
-       $NowUtc -ge $Certificate.NotAfter.ToUniversalTime()){
+       (-not $AllowNativeRenewal -and $NowUtc -ge $Certificate.NotAfter.ToUniversalTime())){
         throw 'Client certificate is expired or not yet valid. Renew the paired identity.'
     }
     $clientUsage=$false
@@ -81,11 +85,19 @@ function Test-LanPilotTlsReadiness($Settings) {
                     [Security.Cryptography.X509Certificates.OpenFlags]::OpenExistingOnly)
         $certificates=$store.Certificates
         $matches=@($certificates | Where-Object {$_.Thumbprint -ieq $Settings.clientCertificate})
+        $native=$Settings.schema -eq 2
+        if($native -and $matches.Count -eq 0){
+            # This is only launcher readiness. Viewer must authenticate the
+            # original protected enrollment and the existing private key before
+            # installing fresh certificates; TLS admission remains mandatory.
+            return [pscustomobject]@{LocalIdentityReady=$false;RenewalAvailable=$true;PeerAuthenticated=$false;ExpiresUtc=$null}
+        }
         if($matches.Count -ne 1){throw 'Expected exactly one client certificate in CurrentUser/My. Provision the paired identity first.'}
-        Assert-LanPilotClientIdentity $matches[0]
+        Assert-LanPilotClientIdentity $matches[0] -AllowNativeRenewal:$native
         # HasPrivateKey is only association evidence; actual key access and all
         # remote authentication/revocation checks remain the native TLS gate.
-        return [pscustomobject]@{LocalIdentityReady=$true;PeerAuthenticated=$false;ExpiresUtc=$matches[0].NotAfter.ToUniversalTime()}
+        $expired=[DateTime]::UtcNow -ge $matches[0].NotAfter.ToUniversalTime()
+        return [pscustomobject]@{LocalIdentityReady=(-not $expired);RenewalAvailable=$native;PeerAuthenticated=$false;ExpiresUtc=$matches[0].NotAfter.ToUniversalTime()}
     } finally {
         if($null -ne $certificates){foreach($certificate in $certificates){$certificate.Dispose()}}
         $store.Dispose()

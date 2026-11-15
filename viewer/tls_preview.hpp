@@ -2,6 +2,7 @@
 #include "rwn/platform/windows/schannel_transport.hpp"
 #include "rwn/transport/channel_session.hpp"
 #include "rwn/transport/tls_stream_io.hpp"
+#include "rwn/desktop/text_clipboard.hpp"
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -10,6 +11,7 @@ namespace rwn::viewer {
 class TlsPreviewConnection {
     std::array<std::unique_ptr<transport::TlsByteChannel>,2> channels_;
     std::array<std::unique_ptr<transport::TlsStreamIo>,2> io_;
+    bool clipboard_allowed_{};
 public:
     static std::string ascii(std::wstring_view value) {
         std::string result;
@@ -33,10 +35,12 @@ public:
     TlsPreviewConnection(const platform::windows::SchannelFallbackClientOptions& options,
                          const transport::TransportEndpoint& endpoint, bool request_input = false) {
         using namespace std::chrono_literals;
-        for (std::size_t i=0;i<2;++i) {
-            channels_[i] = platform::windows::connect_dedicated_tls_channel(options,endpoint);
-            io_[i] = std::make_unique<transport::TlsStreamIo>(*channels_[i]);
-        }
+        auto check_stop=[&]{if(options.establishment_stop.stop_requested())throw transport::TlsTransportInterrupted(transport::TlsTransportInterrupted::Reason::cancelled,"TLS admission cancelled");};
+        check_stop();channels_[0]=platform::windows::connect_dedicated_tls_channel(options,endpoint);
+        core::CancellationCallback first(options.establishment_stop,[channel=channels_[0].get()]()noexcept{channel->cancel();});
+        check_stop();channels_[1]=platform::windows::connect_dedicated_tls_channel(options,endpoint);
+        core::CancellationCallback second(options.establishment_stop,[channel=channels_[1].get()]()noexcept{channel->cancel();});
+        for(std::size_t i=0;i<2;++i)io_[i]=std::make_unique<transport::TlsStreamIo>(*channels_[i]);
         std::array<std::byte,transport::channel_hello_bytes> wire{};
         io_[0]->read_exact(wire,10s);
         const auto issued = transport::decode_channel_hello(wire);
@@ -58,6 +62,20 @@ public:
         io_[1]->read_exact(admission,10s);
         transport::validate_channel_admission(
             transport::decode_channel_admission(admission), issued, request_input);
+        clipboard_allowed_=request_input && transport::decode_channel_admission(admission).grants.text_clipboard;
+        check_stop();
+    }
+    bool clipboard_allowed()const noexcept{return clipboard_allowed_;}
+    std::optional<desktop::TextClipboardMessage> read_clipboard(){
+        if(!clipboard_allowed_)throw std::logic_error("clipboard is not granted");
+        if(!io_[1]->wait_message_start(std::chrono::milliseconds(500)))return {};
+        std::array<std::byte,desktop::text_clipboard_header_size> header{};
+        io_[1]->read_exact(header,std::chrono::seconds(5));
+        const auto size=desktop::text_clipboard_payload_size(header);
+        std::vector<std::byte> wire(header.begin(),header.end());
+        wire.resize(header.size()+size);
+        if(size)io_[1]->read_exact(std::span{wire}.subspan(header.size()),std::chrono::seconds(5));
+        return desktop::decode_text_clipboard(wire);
     }
     bool read(std::span<std::byte> bytes, bool message_start = false) {
         try {

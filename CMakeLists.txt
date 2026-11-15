@@ -61,7 +61,7 @@ if(RWN_BUILD_PACKAGING)
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     COMPONENT runtime)
   if(TARGET rwn-viewer)
-    install(TARGETS rwn-viewer
+    install(TARGETS rwn-viewer rwn-maintenance-launcher LanPilot
       RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
       COMPONENT runtime)
   endif()
@@ -129,11 +129,18 @@ if(RWN_BUILD_PACKAGING)
   if(WIN32)
     install(PROGRAMS
       packaging/windows/Install-DesktopPreview.ps1
+      packaging/windows/Maintain-LanPilotTrust.ps1
+      packaging/windows/Invoke-LanPilotTrustMaintenance.ps1
+      packaging/windows/Register-LanPilotMaintenance.ps1
+      packaging/windows/TrustMaintenance.psm1
+      packaging/windows/ProductInstall.psm1
+      packaging/windows/Start-LanPilotBootstrap.ps1
       packaging/windows/Start-DesktopPreview.ps1
       packaging/windows/Start-LanPilot.ps1
       packaging/windows/Start-LanPilotTls.ps1
       packaging/windows/TlsConnectionSettings.psm1
       packaging/windows/Uninstall-DesktopPreview.ps1
+      packaging/windows/Update-LanPilotTrustBundle.ps1
       DESTINATION "${CMAKE_INSTALL_BINDIR}"
       COMPONENT runtime)
   elseif(APPLE)

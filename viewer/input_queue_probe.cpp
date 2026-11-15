@@ -1,12 +1,90 @@
 // Exercise production queue/writer without OS input hooks, SSH, or injection.
 #include "main.cpp"
 #include <iostream>
+#include "rwn/platform/windows/socket_io_retry.hpp"
+
+static int startup_workflow(){
+    using Startup=rwn::viewer::ConnectionStartup<std::unique_ptr<int>>;
+    using Clock=std::chrono::steady_clock;
+    auto check=[](bool value){if(!value)throw std::runtime_error("startup fixture failed");};
+    const auto instance=GetModuleHandleW(nullptr);constexpr wchar_t name[]=L"LanPilotHiddenStartupFixture";
+    WNDCLASSW definition{};definition.hInstance=instance;definition.lpfnWndProc=window_procedure;definition.lpszClassName=name;
+    if(!RegisterClassW(&definition))throw std::runtime_error("startup fixture class failed");
+    ViewerState state;state.interactive=true;state.connection_usable=false;
+    const auto window=CreateWindowExW(0,name,L"Hidden connection startup",WS_OVERLAPPEDWINDOW,0,0,640,360,nullptr,nullptr,instance,&state);
+    if(!window)throw std::runtime_error("startup fixture window failed");
+    struct Cleanup{HWND w;~Cleanup(){if(IsWindow(w)){SetWindowLongPtrW(w,GWLP_USERDATA,0);DestroyWindow(w);}MSG m{};while(PeekMessageW(&m,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)){};}} cleanup{window};
+    state.enqueue_input({.kind=rwn::desktop::InputKind::raw_key,.value_a=4,.pressed=true,.text={}});
+    check(state.next_reliable_input_sequence==0 && state.reliable_control.empty());
+    {Startup ready([](rwn::core::CancellationToken){return std::make_unique<int>(42);});
+        check(rwn::viewer::wait_for_connection(window,ready));check(*ready.take()==42);}
+    {Startup failed([](rwn::core::CancellationToken)->std::unique_ptr<int>{throw std::runtime_error("fixture trust rejected");});
+        check(rwn::viewer::wait_for_connection(window,failed));bool denied{};try{(void)failed.take();}
+        catch(const rwn::transport::TlsTransportInterrupted&){throw std::runtime_error("trust failure became retryable");}
+        catch(const std::runtime_error& error){denied=std::string_view(error.what())=="fixture trust rejected";}check(denied);}
+    {std::atomic_bool fatal{};Startup pending([&](rwn::core::CancellationToken stop)->std::unique_ptr<int>{
+        rwn::platform::windows::detail::probe_connection_cancellation(stop,[&]{fatal=true;PostMessageW(window,WM_NULL,0,0);});
+        throw std::runtime_error("probe must be cancelled");
+    });check(!rwn::viewer::wait_for_connection(window,pending,[&]{return !fatal;}));}
+    // Real Winsock name resolution + loopback connection, then a native read
+    // stalled exactly where TLS startup would wait for the peer. The production
+    // UI close path must wake it by cancellation and join it without publishing.
+    std::atomic_bool cancelled{},finished{};std::atomic_uint live_results{};
+    struct Result {std::atomic_uint& count;explicit Result(std::atomic_uint& c):count(c){++count;}~Result(){--count;}};
+    const auto start=Clock::now();
+    {rwn::viewer::ConnectionStartup<std::unique_ptr<Result>> pending([&](rwn::core::CancellationToken stop)->std::unique_ptr<Result>{
+        try{rwn::platform::windows::detail::probe_connection_cancellation(stop,[&]{PostMessageW(window,WM_CLOSE,0,0);});}
+        catch(const rwn::transport::TlsTransportInterrupted& error){cancelled=error.reason()==rwn::transport::TlsTransportInterrupted::Reason::cancelled;finished=true;return std::make_unique<Result>(live_results);}
+        finished=true;throw std::runtime_error("probe must be cancelled");
+    });const auto complete=rwn::viewer::wait_for_connection(window,pending);
+        if(complete)(void)pending.take();
+        check(!complete);}
+    const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-start).count();
+    if(!(cancelled && finished && live_results==0 && elapsed<1500 && !IsWindow(window)))throw std::runtime_error("startup cancel failed elapsed_ms="+std::to_string(elapsed)+" cancelled="+std::to_string(cancelled.load())+" finished="+std::to_string(finished.load()));
+    std::cout<<"viewer_startup=PASS native_loopback_cancel=1 worker_joined=1 result_not_published=1 late_result_disposed=1 fatal_during_setup_cancelled=1 trust_error_preserved=1 input_before_auth=0 cancel_ms="<<elapsed<<" shown_ui=0 input_injected=0\n";
+    return 0;
+}
+
+static int reconnect_workflow(){
+    const auto instance=GetModuleHandleW(nullptr);constexpr wchar_t name[]=L"LanPilotHiddenReconnectFixture";
+    WNDCLASSW definition{};definition.hInstance=instance;definition.lpfnWndProc=window_procedure;definition.lpszClassName=name;
+    if(!RegisterClassW(&definition))throw std::runtime_error("reconnect fixture class failed");
+    auto check=[](bool value){if(!value)throw std::runtime_error("reconnect fixture failed");};
+    ViewerState old;old.allow_reconnect=true;
+    const auto window=CreateWindowExW(0,name,L"Hidden connection fixture",WS_OVERLAPPEDWINDOW,0,0,640,360,nullptr,nullptr,instance,&old);
+    if(!window)throw std::runtime_error("reconnect fixture window failed");
+    struct Cleanup{HWND value;~Cleanup(){if(IsWindow(value)){SetWindowLongPtrW(value,GWLP_USERDATA,0);DestroyWindow(value);}MSG m{};while(PeekMessageW(&m,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)){};}} cleanup{window};
+    const rwn::transport::TlsTransportInterrupted interrupted(rwn::transport::TlsTransportInterrupted::Reason::closed,"fixture EOF");
+    old.next_wire_sequence=42;old.input_epoch=9;old.pointer_control=PendingControlMessage{};old.reliable_control.push_back({});
+    old.report_tls_failure(interrupted);
+    MSG message{};
+    while(GetMessageW(&message,nullptr,0,0)>0)DispatchMessageW(&message);
+    check(message.wParam==reconnect_session_exit && old.stopping && IsWindow(window));
+    SetWindowLongPtrW(window,GWLP_USERDATA,0);
+    check(wait_for_reconnect(window,std::chrono::milliseconds{1}));
+    ViewerState fresh;fresh.window=window;fresh.allow_reconnect=true;fresh.resume_control_required=true;
+    SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&fresh));
+    check(fresh.input_epoch==1 && fresh.next_wire_sequence==0 && !fresh.pointer_control && fresh.reliable_control.empty() &&
+          fresh.snapshot_commands.empty() && !fresh.frame && fresh.cursor_cache.empty() && !fresh.clipboard_enabled);
+    SendMessageW(window,reconnect_requested_message,old.connection_instance,0);
+    check(!fresh.stopping); // An old worker cannot restart a new session.
+    fresh.report_tls_failure(interrupted);fresh.report_tls_failure(std::runtime_error("fixture malformed protocol"));
+    while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){check(message.message!=WM_QUIT);DispatchMessageW(&message);}
+    check(fresh.retry_forbidden && !fresh.stopping); // Fatal cause dominates transport closure.
+    SetWindowLongPtrW(window,GWLP_USERDATA,0);
+    PostMessageW(window,WM_CLOSE,0,0);
+    check(!wait_for_reconnect(window,std::chrono::seconds{8}));
+    std::cout<<"viewer_reconnect=PASS same_window=1 old_session_stopped=1 old_state_not_reused=1 stale_notification_rejected=1 fatal_no_retry=1 cancel_wait=1 input_injected=0 network=0 shown_ui=0\n";
+    return 0;
+}
 
 int main(int argc, char** argv) {
     using namespace rwn::desktop;
     ViewerState state;
     HANDLE reader{};
     try {
+        if(argc==2 && std::string_view(argv[1])=="--check-startup")return startup_workflow();
+        if(argc==2 && std::string_view(argv[1])=="--check-reconnect")return reconnect_workflow();
         // Exercise the real heartbeat producer, scheduler and wire encoder.
         // A default PendingControlMessage had timestamp=0 and disconnected
         // both TLS sockets when the first five-second heartbeat was sent.

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
+  <title id="title">LanPilot: one desktop session, optional SSH work</title>
+  <desc id="desc">Mac capture and canonical Metal pixels feed a visual TLS connection to the Windows D3D11 framebuffer. A separate control TLS connection carries input, commit acknowledgements and opt-in text clipboard. Both belong to one authenticated desktop session. Optional SSH workspace tools are independent. ACK confirms framebuffer commit, not monitor scan-out.</desc>
+  <defs>
+    <marker id="green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 1 L8 5 L0 9" fill="none" stroke="#58e2b0" stroke-width="2"/></marker>
+    <marker id="blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 1 L8 5 L0 9" fill="none" stroke="#8cbaff" stroke-width="2"/></marker>
+    <marker id="gray" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 1 L8 5 L0 9" fill="none" stroke="#aab5c5" stroke-width="2"/></marker>
+  </defs>
+  <rect width="1440" height="860" rx="24" fill="#101820"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <path d="M54 58 L76 36 L98 58 M76 36 V84" stroke="#58e2b0" stroke-width="5" fill="none"/>
+    <text x="118" y="69" fill="#ffffff" font-size="32" font-weight="700">LanPilot</text>
+    <text x="54" y="134" fill="#ffffff" font-size="38" font-weight="700">One desktop session. Two focused connections.</text>
+    <text x="56" y="172" fill="#b7c5d5" font-size="21">Keep desktop control responsive. Connect workspace tools only when needed.</text>
+    <rect x="40" y="207" width="1360" height="434" rx="20" fill="#18242f" stroke="#3c5266"/>
+    <text x="64" y="243" fill="#b7c5d5" font-size="17" letter-spacing="2">SHARED TLS IDENTITY · SESSION ADMISSION · CANCELLATION</text>
+    <rect x="64" y="267" width="375" height="344" rx="14" fill="#101820"/>
+    <text x="89" y="310" fill="#ffffff" font-size="29" font-weight="700">Mac</text>
+    <text x="89" y="346" fill="#b7c5d5" font-size="19">ScreenCaptureKit source</text>
+    <rect x="88" y="369" width="327" height="93" rx="9" fill="#1c3533"/>
+    <text x="104" y="402" fill="#58e2b0" font-size="19" font-weight="600">Persistent Metal BGRA8</text>
+    <text x="104" y="433" fill="#dbe8e1" font-size="18">Snapshot / RECT or H.264</text>
+    <rect x="88" y="493" width="327" height="90" rx="9" fill="#203043"/>
+    <text x="104" y="527" fill="#8cbaff" font-size="19" font-weight="600">Native input injection</text>
+    <text x="104" y="558" fill="#dbe3f0" font-size="18">Explicit control permission</text>
+    <rect x="1001" y="267" width="375" height="344" rx="14" fill="#101820"/>
+    <text x="1026" y="310" fill="#ffffff" font-size="29" font-weight="700">Windows</text>
+    <text x="1026" y="346" fill="#b7c5d5" font-size="19">D3D11 compositor</text>
+    <rect x="1025" y="369" width="327" height="93" rx="9" fill="#1c3533"/>
+    <text x="1041" y="402" fill="#58e2b0" font-size="19" font-weight="600">Working → committed surface</text>
+    <text x="1041" y="433" fill="#dbe8e1" font-size="18">Complete transactions only</text>
+    <rect x="1025" y="493" width="327" height="90" rx="9" fill="#203043"/>
+    <text x="1041" y="527" fill="#8cbaff" font-size="19" font-weight="600">Local cursor + keyboard/mouse</text>
+    <text x="1041" y="558" fill="#dbe3f0" font-size="18">Release input on disconnect</text>
+    <text x="720" y="331" text-anchor="middle" fill="#58e2b0" font-size="24" font-weight="600">01 / Visual TLS</text>
+    <text x="720" y="363" text-anchor="middle" fill="#b7c5d5" font-size="18">RWV2 · video + exact state</text>
+    <path d="M458 416 H979" stroke="#58e2b0" stroke-width="3" marker-end="url(#green)"/>
+    <text x="720" y="474" text-anchor="middle" fill="#8cbaff" font-size="24" font-weight="600">02 / Control TLS</text>
+    <path d="M460 533 H979" stroke="#8cbaff" stroke-width="3" marker-start="url(#blue)" marker-end="url(#blue)"/>
+    <text x="720" y="573" text-anchor="middle" fill="#b7c5d5" font-size="18">Input · commit ACK · opt-in text clipboard</text>
+    <rect x="40" y="663" width="1360" height="111" rx="16" fill="#1b222b" stroke="#46515f" stroke-dasharray="7 6"/>
+    <text x="66" y="706" fill="#ffffff" font-size="24" font-weight="600">03 / Optional SSH workspace access</text>
+    <text x="66" y="742" fill="#b7c5d5" font-size="18">Existing account/key · independent lifetime · separate authorization</text>
+    <path d="M848 715 H1018" stroke="#aab5c5" stroke-width="2" marker-start="url(#gray)" marker-end="url(#gray)"/>
+    <text x="1050" y="709" fill="#e1e6ed" font-size="19">Commands · builds · files</text>
+    <text x="1050" y="740" fill="#b7c5d5" font-size="16">Scoped Agent UI: integration target</text>
+    <text x="55" y="816" fill="#b7c5d5" font-size="18">ACK = canonical framebuffer committed. It does not mean physical scan-out.</text>
+    <text x="1382" y="816" text-anchor="end" fill="#58e2b0" font-size="16">Architecture / v0.3 direction</text>
+  </g>
+</svg>

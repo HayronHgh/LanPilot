@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 5.1
 # Issue once, then regenerate signed public revocation artifacts without new keys.
 [CmdletBinding()]
 param(
@@ -11,12 +11,17 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-if(-not $IsWindows){throw 'CurrentUser DPAPI requires Windows.'}
+Import-Module (Join-Path $PSScriptRoot 'TrustMaintenance.psm1') -Force
+if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){throw 'CurrentUser DPAPI requires Windows.'}
+function Test-AbsoluteWindowsPath([string]$Path) {
+    return $Path -match '^[A-Za-z]:[\\/]' -and -not $Path.Substring(2).Contains(':')
+}
 foreach($path in @($OpenSslPath,$AuthorityDirectory,$OutputDirectory)){
-    if(-not [IO.Path]::IsPathFullyQualified($path) -or $path -match '[\x00-\x1f]'){throw 'Absolute local paths required.'}
+    if(-not (Test-AbsoluteWindowsPath $path) -or $path -match '[\x00-\x1f]'){throw 'Absolute local paths required.'}
 }
 if(Test-Path -LiteralPath $OutputDirectory){throw 'Output directory must be new.'}
 $directory=[IO.Path]::GetFullPath($AuthorityDirectory)
+Assert-LanPilotPhysicalFile (Join-Path $directory 'root.der')
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $acl=Get-Acl -LiteralPath $directory
 if(-not $acl.AreAccessRulesProtected){throw 'Authority DACL must be protected.'}
@@ -27,7 +32,7 @@ $serverDirectory=Join-Path $directory 'mac-server'
 $serverCertificate=Join-Path $serverDirectory 'server.pem'
 if($IssueMac){
     if(Test-Path -LiteralPath $serverDirectory){throw 'Mac issuance already exists; refusing duplicate issuance.'}
-    if(-not [IO.Path]::IsPathFullyQualified($MacCsr) -or (Get-Item -LiteralPath $MacCsr).Length -gt 65536){throw 'Bounded absolute CSR required.'}
+    if(-not (Test-AbsoluteWindowsPath $MacCsr) -or (Get-Item -LiteralPath $MacCsr).Length -gt 65536){throw 'Bounded absolute CSR required.'}
     $ip=$null
     if(-not [Net.IPAddress]::TryParse($MacAddress,[ref]$ip) -or
        $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or $ip.ToString() -cne $MacAddress){throw 'Canonical LAN IPv4 required for certificate SAN.'}
@@ -38,13 +43,20 @@ if($IssueMac){
 $lock=[IO.File]::Open((Join-Path $directory 'maintenance.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 $secret=$null
 try {
-    Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
+    Add-Type -AssemblyName System.Security
     $secret=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $directory 'authority-passphrase.dpapi')),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+    function ConvertTo-NativeArgument([string]$Value) {
+        if($Value.Length -eq 0){return '""'}
+        if($Value -notmatch '[\s"]'){return $Value}
+        $escaped=[regex]::Replace($Value,'(\\*)"','$1$1\"')
+        $escaped=[regex]::Replace($escaped,'(\\+)$','$1$1')
+        return '"'+$escaped+'"'
+    }
     function Invoke-Crypto([string[]]$Arguments) {
         $start=[Diagnostics.ProcessStartInfo]::new($OpenSslPath)
         $start.UseShellExecute=$false; $start.CreateNoWindow=$true
         $start.RedirectStandardInput=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
-        foreach($argument in $Arguments){$start.ArgumentList.Add($argument)}
+        $start.Arguments=(@($Arguments | ForEach-Object {ConvertTo-NativeArgument $_}) -join ' ')
         $process=[Diagnostics.Process]::Start($start)
         try {
             $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
@@ -92,7 +104,8 @@ subjectAltName = IP:$MacAddress
     $hashes=[ordered]@{}
     foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $OutputDirectory $file) -Algorithm SHA256).Hash.ToLowerInvariant()}
     # Manifest written LAST: failed or partial bundles are never marked ready.
-    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'bundle.json'),([ordered]@{schema=1;createdUtc=[DateTime]::UtcNow.ToString('o');refreshBeforeUtc=[DateTime]::UtcNow.AddDays(6).ToString('o');files=$hashes} | ConvertTo-Json -Depth 4))
+    $createdUtc=[DateTime]::UtcNow
+    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'bundle.json'),([ordered]@{schema=1;createdUtc=$createdUtc.ToString('o');refreshBeforeUtc=$createdUtc.AddDays(6).ToString('o');expiresUtc=$createdUtc.AddDays(7).ToString('o');files=$hashes} | ConvertTo-Json -Depth 4))
     Write-Output 'trust_bundle=verified public_only=1 validity_days=7 automatic_refresh=0'
 } finally {
     if($secret){[Array]::Clear($secret,0,$secret.Length)}

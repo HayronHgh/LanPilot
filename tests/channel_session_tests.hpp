@@ -126,7 +126,7 @@ inline void security() {
         rejects([&]{static_cast<void>(decode_channel_admission(broken));});
     }
     for (unsigned flags=0;flags<256;++flags) {
-        if (flags==3 || flags==7) continue;
+        if (flags==3 || flags==7 || flags==15) continue; // Explicit interactive clipboard policy.
         auto broken=admission; broken[5]=std::byte{static_cast<unsigned char>(flags)};
         rejects([&]{static_cast<void>(decode_channel_admission(broken));});
     }

@@ -5,12 +5,26 @@
 #include <cstddef>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace rwn::transport {
 inline constexpr std::string_view desktop_tcp_alpn = "lanpilot/tcp/1";
 inline constexpr std::size_t tls_channel_write_limit = 64U * 1024U;
+
+// Only an interrupted transport may be retried by a new authenticated session.
+// Certificate, TLS integrity, admission and application parsing errors are NOT
+// this type. Cancellation of a sibling worker is not a new failure.
+class TlsTransportInterrupted final : public std::runtime_error {
+public:
+    enum class Reason { closed, timeout, unavailable, cancelled };
+    TlsTransportInterrupted(Reason reason,std::string message)
+        :std::runtime_error(std::move(message)),reason_(reason){}
+    Reason reason()const noexcept{return reason_;}
+private:Reason reason_;
+};
 
 // One instance owns ONE TCP socket / TLS context, not a multiplexed stream.
 // One reader and one writer may run concurrently. No application message

@@ -1,4 +1,6 @@
 #include "channel_session_tests.hpp"
+#include "text_clipboard_tests.hpp"
+#include "pairing_consent_tests.hpp"
 #include "rwn/core/audit.hpp"
 #include "rwn/audio/audio.hpp"
 #include "rwn/client/session_client.hpp"
@@ -59,6 +61,7 @@
 #endif
 
 #if defined(RWN_TEST_WINDOWS_PLATFORM)
+#include "socket_io_retry_tests.hpp"
 #include "rwn/platform/windows/command_executor.hpp"
 #include "rwn/platform/windows/desktop_runtime.hpp"
 #include "rwn/platform/windows/directory_watcher.hpp"
@@ -4588,7 +4591,10 @@ void visual_evidence_compares_latency_quality_and_exact_residency() {
 
 int main() {
     rwn::test::Runner runner;
+    runner.run("pairing requires both confirmations and durable completion", pairing_consent_tests::workflow);
     runner.run("independent TCP channels bind and revoke together", channel_tests::workflow);
+    runner.run("text clipboard epoch and concurrent copy convergence",text_clipboard_tests::workflow);
+    runner.run("bidirectional clipboard sidecars require opt in and suppress echoes",text_clipboard_tests::pump_workflow);
     runner.run("snapshot GPU batch remains row aligned independent of wire chunks", [] {
         constexpr std::size_t budget = 1024U * 1024U;
         for (const std::size_t width : {1920U, 1919U, 1280U, 1U}) {
@@ -4665,6 +4671,7 @@ int main() {
     runner.run("protocol and release security gates accept valid corpora", protocol_mutation_and_release_security_gates_pass_valid_corpora);
     runner.run("release compatibility verifies signed package binding", release_compatibility_and_signed_update_bind_real_package);
 #if defined(RWN_TEST_WINDOWS_PLATFORM)
+    runner.run("Winsock would-block retries preserve progress and deadline", socket_retry_preserves_progress_and_deadline);
     runner.run("Windows NV12 repack preserves padded chroma origin", windows_nv12_repack_preserves_padded_chroma_origin);
     runner.run("Windows Raw Input maps full standard keyboard", windows_raw_keyboard_maps_full_standard_layout);
     runner.run("Windows CNG verifies P-256 update signatures", windows_cng_verifies_rfc6979_p256_signature);

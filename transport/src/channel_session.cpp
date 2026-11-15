@@ -51,9 +51,12 @@ std::array<std::byte, channel_admission_bytes> encode_channel_admission(const Ch
     validate({TcpChannel::visual, admission.session_id, admission.generation});
     if (!admission.grants.visual || !admission.grants.control)
         throw std::invalid_argument("desktop admission requires both channels");
+    if(admission.grants.text_clipboard && !admission.grants.desktop_input)
+        throw std::invalid_argument("clipboard preview requires interactive local policy");
     std::array<std::byte, channel_admission_bytes> out{};
     out[0]=std::byte{'L'}; out[1]=std::byte{'P'}; out[2]=std::byte{'A'}; out[3]=std::byte{'1'};
     out[4]=std::byte{1}; out[5]=admission.grants.desktop_input ? std::byte{7} : std::byte{3};
+    if(admission.grants.text_clipboard)out[5]|=std::byte{8};
     for (std::size_t i=0;i<16;++i) out[8+i]=std::byte{admission.session_id[i]};
     for (std::size_t i=0;i<8;++i)
         out[24+i]=std::byte{static_cast<std::uint8_t>(admission.generation >> ((7-i)*8))};
@@ -62,10 +65,10 @@ std::array<std::byte, channel_admission_bytes> encode_channel_admission(const Ch
 ChannelAdmission decode_channel_admission(std::span<const std::byte> bytes) {
     if (bytes.size()!=channel_admission_bytes || bytes[0]!=std::byte{'L'} || bytes[1]!=std::byte{'P'} ||
         bytes[2]!=std::byte{'A'} || bytes[3]!=std::byte{'1'} || bytes[4]!=std::byte{1} ||
-        (bytes[5]!=std::byte{3} && bytes[5]!=std::byte{7}) || bytes[6]!=std::byte{} || bytes[7]!=std::byte{})
+        (bytes[5]!=std::byte{3} && bytes[5]!=std::byte{7} && bytes[5]!=std::byte{15}) || bytes[6]!=std::byte{} || bytes[7]!=std::byte{})
         throw std::invalid_argument("invalid desktop admission framing");
     ChannelAdmission result;
-    result.grants={true,true,bytes[5]==std::byte{7}};
+    result.grants={true,true,(bytes[5]&std::byte{4})!=std::byte{},(bytes[5]&std::byte{8})!=std::byte{}};
     for (std::size_t i=0;i<16;++i) result.session_id[i]=std::to_integer<std::uint8_t>(bytes[8+i]);
     for (std::size_t i=0;i<8;++i) result.generation=(result.generation<<8)|std::to_integer<std::uint8_t>(bytes[24+i]);
     validate({TcpChannel::visual,result.session_id,result.generation});
@@ -88,6 +91,8 @@ TcpChannelSession::TcpChannelSession(ChannelSessionId id, std::uint64_t generati
     if (!nonzero(peer_)) throw std::invalid_argument("empty authorized peer");
     if (grants_.desktop_input && !grants_.control)
         throw std::invalid_argument("input requires a control channel grant");
+    if(grants_.text_clipboard && (!grants_.control || !grants_.desktop_input))
+        throw std::invalid_argument("clipboard preview requires explicit interactive policy");
 }
 bool TcpChannelSession::attach(const ChannelHello& hello,
     const AuthenticatedPeerEvidence& verified_peer, std::uint64_t connection_id,
@@ -120,5 +125,8 @@ bool TcpChannelSession::input_allowed(std::uint64_t connection_id, Clock::time_p
 void TcpChannelSession::revoke() noexcept {
     revoked_ = true;
     connections_.fill(0);
+}
+bool TcpChannelSession::clipboard_allowed(std::uint64_t connection_id,Clock::time_point now)const{
+    return grants_.text_clipboard && input_allowed(connection_id,now);
 }
 } // namespace rwn::transport

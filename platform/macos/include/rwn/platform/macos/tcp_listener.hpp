@@ -4,6 +4,8 @@
 #include "rwn/transport/channel_session.hpp"
 #include <memory>
 #include <string>
+#include "rwn/core/cancellation.hpp"
+#include <functional>
 
 namespace rwn::platform::macos {
 // CSPRNG identifier, not a capability or replacement for peer authentication.
@@ -29,19 +31,23 @@ public:
     DedicatedTlsListener(rwn::transport::AppleNetworkServerOptions options,
                          std::string bind_address = "127.0.0.1",
                          std::vector<std::byte> exclusive_root_der = {},
-                         std::vector<std::byte> client_ocsp_response_der = {});
+                         std::vector<std::byte> client_ocsp_response_der = {},
+                         std::function<std::vector<std::byte>()> native_status_provider = {});
     ~DedicatedTlsListener();
     DedicatedTlsListener(const DedicatedTlsListener&) = delete;
     DedicatedTlsListener& operator=(const DedicatedTlsListener&) = delete;
+    // Wait for Network.framework to finish binding, before publishing a local
+    // startup receipt. Closed, failed, cancelled or expired waits throw.
+    void wait_ready(std::chrono::milliseconds timeout, rwn::core::CancellationToken stop = {});
     [[nodiscard]] std::unique_ptr<rwn::transport::TlsByteChannel> accept(
-        std::chrono::milliseconds timeout);
+        std::chrono::milliseconds timeout, rwn::core::CancellationToken stop = {});
     // Null means ONLY no queued connection during this idle interval.
     // Once dequeued, authentication has its own bounded deadline; failures
     // throw. This permits a service to wait without restarting or extending
     // an unauthenticated client's handshake indefinitely.
     [[nodiscard]] std::unique_ptr<rwn::transport::TlsByteChannel> try_accept(
         std::chrono::milliseconds idle_timeout,
-        std::chrono::milliseconds handshake_timeout);
+        std::chrono::milliseconds handshake_timeout, rwn::core::CancellationToken stop = {});
     // Wakes an idle accept; accepted channels retain independent ownership.
     void cancel() noexcept;
     [[nodiscard]] std::uint16_t listen_port() const noexcept;

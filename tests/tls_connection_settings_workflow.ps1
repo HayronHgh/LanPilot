@@ -35,6 +35,10 @@ try{
     if($LASTEXITCODE -ne 0){throw 'Fresh Windows PowerShell launcher failed'}
     & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout
     if($LASTEXITCODE -ne 0){throw 'Saved TLS fields or simplified layout failed'}
+    # Run actual WinForms callbacks, without showing a window. Fixture identity
+    # is intentionally absent, so use CheckLayout only to skip native readiness.
+    & $windowsHost -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout -CheckEventLoop
+    if($LASTEXITCODE -ne 0){throw 'Real callback loop lost saved pairing'}
     & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath (Join-Path $testRoot 'missing.json') -CheckLayout -ExpectUnavailable
     if($LASTEXITCODE -ne 0){throw 'Missing pairing must disable connection without trust entry'}
     # Read-only store lookup must fail before launching a Viewer for this absent identity.
@@ -63,6 +67,11 @@ try{
     Reject {Restore-LanPilotRecovery $profile}
     if((Get-FileHash -LiteralPath $profile).Hash -ne $before){throw 'Tampered recovery changed profile'}
     [IO.File]::WriteAllBytes($profile+'.recovery',$protected)
+    Remove-Item -LiteralPath $profile
+    & $windowsHost -NoProfile -ExecutionPolicy Bypass -File (Join-Path $packaging 'Start-LanPilotTls.ps1') -ConfigPath $profile -CheckLayout
+    if($LASTEXITCODE -ne 0){throw 'Protected connection must automatically recover without user certificate entry'}
+    $auto=Read-LanPilotTlsSettings $profile
+    if($auto.host -cne $settings.host -or $auto.serverFingerprint -cne $settings.serverFingerprint){throw 'Automatic recovery changed remembered peer'}
     Remove-Item -LiteralPath $rootDer
     $restored=Restore-LanPilotRecovery $profile
     if($restored.serverFingerprint -cne $settings.serverFingerprint -or

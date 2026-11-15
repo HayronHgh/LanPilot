@@ -10,6 +10,15 @@ add_library(rwn_core
   src/deployment.cpp
   src/file_transfer.cpp
   src/identity.cpp
+  src/enrollment_certificate.cpp
+  src/enrollment_pairing.cpp
+  src/enrollment_identity.cpp
+  src/enrollment_journal.cpp
+  src/enrollment_commit.cpp
+  src/enrollment_configuration.cpp
+  src/enrollment_setup.cpp
+  src/enrollment_status.cpp
+    src/enrollment_credentials.cpp
   src/pairing_store.cpp
   src/ignore_rules.cpp
   src/policy_file.cpp

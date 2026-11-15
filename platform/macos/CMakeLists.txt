@@ -1,6 +1,7 @@
 enable_language(OBJCXX)
 
 add_library(rwn_platform_macos
+  ../common/enrollment_tcp.cpp
   src/app_packager.cpp
   src/audio_runtime.mm
   src/build_worker_ipc.cpp
@@ -9,14 +10,18 @@ add_library(rwn_platform_macos
   src/deployment_broker_ipc.cpp
   src/directory_watcher.mm
   src/durable_filesystem.cpp
+  src/enrollment_key.mm
+  src/enrollment_identity.mm
+  src/enrollment_journal.mm
   src/network_transport.mm
   src/pairing_code.cpp
+  src/pairing_consent.mm
   src/pty_terminal.cpp
   src/process_identity.cpp
   src/update_signature.cpp
 )
 
-target_include_directories(rwn_platform_macos PUBLIC include)
+target_include_directories(rwn_platform_macos PUBLIC include ../common/include)
 target_link_libraries(rwn_platform_macos PUBLIC
   rwn::audio rwn::core rwn::desktop rwn::protocol rwn::transport)
 target_link_libraries(rwn_platform_macos PRIVATE
@@ -34,7 +39,7 @@ target_link_libraries(rwn_platform_macos PRIVATE
   rwn_project_options
 )
 target_compile_options(rwn_platform_macos PRIVATE -fblocks)
-set_source_files_properties(src/network_transport.mm PROPERTIES
+set_source_files_properties(src/network_transport.mm src/pairing_consent.mm PROPERTIES
   COMPILE_OPTIONS "-fobjc-arc")
 add_library(rwn::platform_macos ALIAS rwn_platform_macos)
 

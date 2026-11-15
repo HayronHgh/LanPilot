@@ -1,4 +1,5 @@
 #include "rwn/platform/windows/schannel_transport.hpp"
+#include "rwn/platform/windows/socket_io_retry.hpp"
 
 #ifndef SECURITY_WIN32
 #define SECURITY_WIN32
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +41,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -67,6 +70,8 @@ constexpr std::array<std::uint8_t, 4> frame_magic{'R', 'W', 'F', 1};
 constexpr std::array<std::uint8_t, 5> binding_magic{'R', 'W', 'N', 'B', 1};
 constexpr std::string_view exporter_label =
     "EXPORTER-RemoteWorkspaceNode-Fallback-v1";
+static_assert(detail::socket_would_block == WSAEWOULDBLOCK);
+static_assert(detail::socket_interrupted == WSAEINTR);
 constexpr std::array<std::uint8_t, 15> exporter_context{
     'r', 'w', 'n', '-', 'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k', '-', 'v', '1'};
 
@@ -93,9 +98,7 @@ constexpr std::array<std::uint8_t, 15> exporter_context{
 }
 
 [[noreturn]] void fail_winsock(const std::string_view operation) {
-    throw std::runtime_error(
-        std::string(operation) + " failed; wsa=" +
-        std::to_string(WSAGetLastError()));
+    detail::throw_socket_error(operation,WSAGetLastError());
 }
 
 [[nodiscard]] std::wstring utf8_to_wide(const std::string_view value) {
@@ -227,11 +230,14 @@ private:
 
 void wait_socket(
     const SOCKET socket_value, const bool write,
-    const std::chrono::steady_clock::time_point deadline) {
+    const std::chrono::steady_clock::time_point deadline,
+    const bool connecting = false,core::CancellationToken stop = {}) {
+    for (;;) {
+    if(stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"TCP connection cancelled");
     const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) throw std::runtime_error("Schannel socket timed out");
-    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
-        deadline - now);
+    if (now >= deadline) throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::timeout,"Schannel socket timed out");
+    auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline-now);
+    if(connecting || stop.stop_possible())remaining=std::min(remaining,std::chrono::microseconds{50'000});
     timeval timeout{
         .tv_sec = static_cast<long>(remaining.count() / 1'000'000),
         .tv_usec = static_cast<long>(remaining.count() % 1'000'000),
@@ -239,42 +245,46 @@ void wait_socket(
     fd_set selected;
     FD_ZERO(&selected);
     FD_SET(socket_value, &selected);
+    auto exceptions = selected;
     const auto status = select(
         0, write ? nullptr : &selected, write ? &selected : nullptr,
-        nullptr, &timeout);
-    if (status == 0) throw std::runtime_error("Schannel socket timed out");
-    if (status == SOCKET_ERROR) fail_winsock("Schannel socket wait");
+        connecting ? &exceptions : nullptr, &timeout);
+    if (status == 0) continue; // Preserve the original deadline while observing cancellation.
+    if (status == SOCKET_ERROR) {
+        if (WSAGetLastError() == WSAEINTR) continue;
+        fail_winsock("Schannel socket wait");
+    }
+    return;
+    }
 }
 
 void send_all(
     const SOCKET socket_value, const std::span<const std::uint8_t> data,
-    const std::chrono::steady_clock::time_point deadline) {
+    const std::chrono::steady_clock::time_point deadline,core::CancellationToken stop = {}) {
     std::size_t sent{};
     while (sent < data.size()) {
-        wait_socket(socket_value, true, deadline);
-        const auto amount = send(
+        const auto amount = detail::retry_nonblocking_socket_io("Schannel TCP send",
+            [&] { wait_socket(socket_value, true, deadline,false,stop); }, [&] { return send(
             socket_value,
             reinterpret_cast<const char*>(data.data() + sent),
             static_cast<int>(std::min<std::size_t>(
                 data.size() - sent,
                 static_cast<std::size_t>(std::numeric_limits<int>::max()))),
-            0);
-        if (amount == SOCKET_ERROR) fail_winsock("Schannel TCP send");
-        if (amount == 0) throw std::runtime_error("Schannel TCP send closed");
+            0); }, [] { return WSAGetLastError(); });
+        if (amount == 0) throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::closed,"Schannel TCP send closed");
         sent += static_cast<std::size_t>(amount);
     }
 }
 
 [[nodiscard]] std::vector<std::uint8_t> receive_tcp(
     const SOCKET socket_value,
-    const std::chrono::steady_clock::time_point deadline) {
-    wait_socket(socket_value, false, deadline);
+    const std::chrono::steady_clock::time_point deadline,core::CancellationToken stop = {}) {
     std::array<std::uint8_t, 64U * 1024U> buffer{};
-    const auto amount = recv(
+    const auto amount = detail::retry_nonblocking_socket_io("Schannel TCP receive",
+        [&] { wait_socket(socket_value, false, deadline,false,stop); }, [&] { return recv(
         socket_value, reinterpret_cast<char*>(buffer.data()),
-        static_cast<int>(buffer.size()), 0);
-    if (amount == SOCKET_ERROR) fail_winsock("Schannel TCP receive");
-    if (amount == 0) throw std::runtime_error("Schannel TCP peer closed");
+        static_cast<int>(buffer.size()), 0); }, [] { return WSAGetLastError(); });
+    if (amount == 0) throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::closed,"Schannel TCP peer closed");
     return {buffer.begin(), buffer.begin() + amount};
 }
 
@@ -312,26 +322,56 @@ void send_udp(
 
 [[nodiscard]] SocketHandle connect_socket(
     const TransportEndpoint& endpoint, const int socket_type,
-    const int protocol, const std::chrono::milliseconds timeout) {
+    const int protocol, const std::chrono::milliseconds timeout,core::CancellationToken stop = {}) {
     require_winsock();
-    addrinfo hints{};
+    const auto deadline=deadline_after(timeout);
+    using CancelLookup=INT(WSAAPI*)(LPHANDLE);
+    using LookupResult=INT(WSAAPI*)(LPOVERLAPPED);
+    // MinGW lacks declarations for these Win8+ entry points. Resolve the
+    // documented functions from the already-loaded system Winsock module.
+    const auto module=GetModuleHandleW(L"ws2_32.dll");
+    const auto cancel_lookup=std::bit_cast<CancelLookup>(GetProcAddress(module,"GetAddrInfoExCancel"));
+    const auto lookup_result=std::bit_cast<LookupResult>(GetProcAddress(module,"GetAddrInfoExOverlappedResult"));
+    struct Lookup {
+        HANDLE event{CreateEventW(nullptr,TRUE,FALSE,nullptr)},cancel_handle{};
+        OVERLAPPED overlapped{};PADDRINFOEXW results{};bool pending{};CancelLookup cancel;
+        explicit Lookup(CancelLookup c):cancel(c){overlapped.hEvent=event;}
+        ~Lookup(){if(pending){cancel(&cancel_handle);WaitForSingleObject(event,INFINITE);}
+            if(results)FreeAddrInfoExW(results);
+            if(event)CloseHandle(event);}
+    } lookup(cancel_lookup);
+    if(!module || !cancel_lookup || !lookup_result || !lookup.event)throw std::runtime_error("cancellable name lookup unavailable");
+    if(stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"name lookup cancelled");
+    ADDRINFOEXW hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = socket_type;
     hints.ai_protocol = protocol;
-    addrinfo* addresses{};
-    const auto service = std::to_string(endpoint.port);
-    const auto resolve_status = getaddrinfo(
-        endpoint.host.c_str(), service.c_str(), &hints, &addresses);
-    if (resolve_status != 0 || addresses == nullptr) {
+    const auto host=utf8_to_wide(endpoint.host),service=std::to_wstring(endpoint.port);
+    timeval lookup_timeout{static_cast<long>(timeout.count()/1000),static_cast<long>((timeout.count()%1000)*1000)};
+    auto resolve_status=GetAddrInfoExW(host.c_str(),service.c_str(),NS_DNS,nullptr,&hints,&lookup.results,
+        &lookup_timeout,&lookup.overlapped,nullptr,&lookup.cancel_handle);
+    if(resolve_status==WSA_IO_PENDING){
+        lookup.pending=true;
+        for(;;){
+            const auto wait=WaitForSingleObject(lookup.event,50);
+            if(wait==WAIT_OBJECT_0){lookup.pending=false;resolve_status=lookup_result(&lookup.overlapped);break;}
+            if(wait==WAIT_FAILED)throw std::runtime_error("name lookup wait failed");
+            if(stop.stop_requested() || std::chrono::steady_clock::now()>=deadline){
+                cancel_lookup(&lookup.cancel_handle);WaitForSingleObject(lookup.event,INFINITE);lookup.pending=false;
+                throw rwn::transport::TlsTransportInterrupted(stop.stop_requested()?rwn::transport::TlsTransportInterrupted::Reason::cancelled:rwn::transport::TlsTransportInterrupted::Reason::timeout,"name lookup stopped");
+            }
+        }
+    }
+    if(stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"name lookup cancelled");
+    if (resolve_status != 0 || lookup.results == nullptr) {
         throw std::runtime_error(
             "Schannel endpoint resolution failed; status=" +
             std::to_string(resolve_status));
     }
-    const auto free_addresses = std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>(
-        addresses, &freeaddrinfo);
-    static_cast<void>(free_addresses);
-    const auto deadline = deadline_after(timeout);
+    const auto addresses=lookup.results;
     int last_error{};
+    for (;;) {
+    if(stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"TCP connection cancelled");
     for (auto* address = addresses; address != nullptr;
          address = address->ai_next) {
         SocketHandle candidate(socket(
@@ -355,11 +395,9 @@ void send_udp(
                 last_error != WSAEINPROGRESS) {
                 continue;
             }
-            try {
-                wait_socket(candidate.get(), true, deadline);
-            } catch (...) {
-                continue;
-            }
+            // Failed connects signal exceptfds on Winsock. Always inspect
+            // SO_ERROR; never report the initial WSAEWOULDBLOCK as the result.
+            wait_socket(candidate.get(), true, deadline, true,stop);
             int socket_error{};
             int length = sizeof(socket_error);
             if (getsockopt(
@@ -378,9 +416,14 @@ void send_udp(
         }
         return candidate;
     }
-    throw std::runtime_error(
-        "Schannel endpoint connect failed; wsa=" +
-        std::to_string(last_error));
+    // A user agent can briefly stop listening between sessions. Retry TCP
+    // refusal only, within this invocation's original connection deadline.
+    if (protocol != IPPROTO_TCP || last_error != WSAECONNREFUSED ||
+        std::chrono::steady_clock::now() >= deadline) break;
+    std::this_thread::sleep_until(std::min(deadline,
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{50}));
+    }
+    detail::throw_socket_error("Schannel endpoint connect",last_error);
 }
 
 [[nodiscard]] std::uint8_t hex_nibble(const char character) {
@@ -470,16 +513,20 @@ public:
         const bool datagram, const bool dedicated_tcp = false)
         : options_(options), endpoint_(endpoint), settings_(settings),
           datagram_(datagram), target_name_(utf8_to_wide(endpoint.host)) {
+        if(options_.establishment_stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"TLS establishment cancelled");
         open_certificate();
         acquire_credentials();
         socket_ = connect_socket(
             endpoint_, datagram_ ? SOCK_DGRAM : SOCK_STREAM,
             datagram_ ? IPPROTO_UDP : IPPROTO_TCP,
-            options_.connect_timeout);
+            options_.connect_timeout,options_.establishment_stop);
+        core::CancellationCallback cancellation(options_.establishment_stop,[this]()noexcept{cancel_io();});
+        if(options_.establishment_stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"TLS handshake cancelled");
         if (dedicated_tcp) configure_dedicated_tcp();
         handshake();
         validate_context();
         query_sizes();
+        if(options_.establishment_stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"TLS handshake cancelled");
     }
 
     [[nodiscard]] const EncryptedPlaneEvidence& evidence() const noexcept {
@@ -572,7 +619,7 @@ public:
         if (datagram_) {
             send_udp(socket_.get(), encrypted, deadline);
         } else {
-            send_all(socket_.get(), encrypted, deadline);
+            send_all(socket_.get(), encrypted, deadline,io_stop_.token());
         }
     }
 
@@ -585,11 +632,11 @@ public:
         }
         while (true) {
             if (encrypted_pending_.empty()) {
-                encrypted_pending_ = receive_tcp(socket_.get(), deadline);
+                encrypted_pending_ = receive_tcp(socket_.get(), deadline,io_stop_.token());
             }
             auto result = decrypt_packet(encrypted_pending_, true);
             if (!result.empty()) return result;
-            const auto more = receive_tcp(socket_.get(), deadline);
+            const auto more = receive_tcp(socket_.get(), deadline,io_stop_.token());
             if (encrypted_pending_.size() + more.size() >
                 maximum_stream_message_bytes + 256U * 1024U) {
                 throw std::length_error(
@@ -625,14 +672,14 @@ public:
         if (setsockopt(socket_.get(), IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&enabled), sizeof(enabled)) != 0)
             fail_winsock("dedicated TCP_NODELAY");
-        // select deadlines cannot bound a subsequent blocking send. Dedicated
-        // channels fail closed on would-block races instead of hanging a worker.
+        // Keep I/O nonblocking and retry readiness races within the original
+        // deadline; WSAEWOULDBLOCK does not imply a failed TLS session.
         u_long nonblocking = 1;
         if (ioctlsocket(socket_.get(), FIONBIO, &nonblocking) != 0)
             fail_winsock("dedicated TCP nonblocking");
     }
 
-    void cancel_io() noexcept { static_cast<void>(shutdown(socket_.get(), SD_BOTH)); }
+    void cancel_io() noexcept { io_stop_.request_stop();static_cast<void>(shutdown(socket_.get(), SD_BOTH)); }
 
 private:
     void open_certificate() {
@@ -769,7 +816,7 @@ private:
                 if (datagram_) {
                     send_udp(socket_.get(), token, deadline);
                 } else {
-                    send_all(socket_.get(), token, deadline);
+                    send_all(socket_.get(), token, deadline,io_stop_.token());
                 }
             }
             if (status == SEC_E_OK || status == SEC_I_COMPLETE_NEEDED) {
@@ -778,7 +825,7 @@ private:
                 return;
             }
             if (status == SEC_E_INCOMPLETE_MESSAGE && !datagram_) {
-                const auto more = receive_tcp(socket_.get(), deadline);
+                const auto more = receive_tcp(socket_.get(), deadline,io_stop_.token());
                 if (incoming.size() + more.size() > maximum_handshake_bytes) {
                     throw std::length_error(
                         "Schannel handshake exceeded bounds");
@@ -802,7 +849,7 @@ private:
             if (datagram_) {
                 incoming = receive_udp(socket_.get(), deadline);
             } else if (incoming.empty()) {
-                incoming = receive_tcp(socket_.get(), deadline);
+                incoming = receive_tcp(socket_.get(), deadline,io_stop_.token());
             }
             if (incoming.size() > maximum_handshake_bytes) {
                 throw std::length_error("Schannel handshake exceeded bounds");
@@ -1056,7 +1103,7 @@ private:
             context_.get(), &descriptor, 0, nullptr);
         if (status == SEC_E_INCOMPLETE_MESSAGE && stream) return {};
         if (status == SEC_I_CONTEXT_EXPIRED) {
-            throw std::runtime_error("Schannel peer closed securely");
+            throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::closed,"Schannel peer closed securely");
         }
         if (status == SEC_I_RENEGOTIATE) {
             throw std::runtime_error("Schannel renegotiation is not allowed");
@@ -1091,6 +1138,7 @@ private:
         return plaintext;
     }
 
+    core::CancellationSource io_stop_;
     SchannelFallbackClientOptions options_;
     TransportEndpoint endpoint_;
     QuicTransportSettings settings_;
@@ -1680,7 +1728,7 @@ public:
                 native_->send_plain({reinterpret_cast<const std::uint8_t*>(bytes.data()), size}, remaining);
                 bytes = bytes.subspan(size);
             }
-        } catch (...) { cancel(); throw; }
+        } catch (...) { rethrow_io_failure(); }
     }
     std::vector<std::byte> read_some(std::chrono::milliseconds timeout) override {
         validate_timeout(timeout);
@@ -1693,25 +1741,30 @@ public:
             std::vector<std::byte> result(bytes.size());
             std::memcpy(result.data(), bytes.data(), bytes.size());
             return result;
-        } catch (...) { cancel(); throw; }
+        } catch (...) { rethrow_io_failure(); }
     }
     bool wait_readable(std::chrono::milliseconds timeout) override {
         validate_timeout(timeout);
         std::scoped_lock lock(read_mutex_);
         require_open();
         try { return native_->wait_readable(timeout); }
-        catch (...) { cancel(); throw; }
+        catch (...) { rethrow_io_failure(); }
     }
     void cancel() noexcept override {
         if (!cancelled_.exchange(true) && native_) native_->cancel_io();
     }
 private:
+    [[noreturn]] void rethrow_io_failure(){
+        const auto cause=std::current_exception();const auto sibling_cancelled=cancelled_.load();cancel();
+        if(sibling_cancelled)throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"dedicated TLS channel cancelled");
+        std::rethrow_exception(cause);
+    }
     static void validate_timeout(std::chrono::milliseconds timeout) {
         if (timeout.count() <= 0 || timeout > std::chrono::seconds(30))
             throw std::invalid_argument("dedicated TLS IO timeout outside bounds");
     }
     void require_open() const {
-        if (cancelled_.load()) throw std::runtime_error("dedicated TLS channel cancelled");
+        if (cancelled_.load()) throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"dedicated TLS channel cancelled");
     }
     std::unique_ptr<NativeClientChannel> native_;
     rwn::transport::AuthenticatedPeerEvidence peer_{};
@@ -1725,6 +1778,22 @@ std::unique_ptr<rwn::transport::TlsByteChannel> connect_dedicated_tls_channel(
     validate_schannel_fallback_client_options(options);
     rwn::transport::validate_transport_endpoint(endpoint);
     return std::make_unique<DedicatedSchannelChannel>(options, endpoint);
+}
+
+void detail::probe_connection_cancellation(core::CancellationToken stop,const std::function<void()>& on_wait){
+    require_winsock();SocketHandle listener(socket(AF_INET,SOCK_STREAM,IPPROTO_TCP));
+    if(listener.get()==INVALID_SOCKET)fail_winsock("probe socket");
+    sockaddr_in address{};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    if(bind(listener.get(),reinterpret_cast<sockaddr*>(&address),sizeof(address)) || listen(listener.get(),1))fail_winsock("probe listen");
+    int length=sizeof(address);if(getsockname(listener.get(),reinterpret_cast<sockaddr*>(&address),&length))fail_winsock("probe address");
+    auto client=connect_socket(TransportEndpoint{"127.0.0.1",ntohs(address.sin_port)},SOCK_STREAM,IPPROTO_TCP,std::chrono::seconds{2},stop);
+    wait_socket(listener.get(),false,deadline_after(std::chrono::seconds{2}));
+    SocketHandle peer(accept(listener.get(),nullptr,nullptr));if(peer.get()==INVALID_SOCKET)fail_winsock("probe accept");
+    core::CancellationCallback cancellation(stop,[&]()noexcept{shutdown(client.get(),SD_BOTH);});
+    on_wait();
+    try{(void)receive_tcp(client.get(),deadline_after(std::chrono::seconds{2}),stop);}
+    catch(...){if(stop.stop_requested())throw rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::cancelled,"native startup probe cancelled");throw;}
+    throw std::runtime_error("native startup probe unexpectedly received data");
 }
 
 }  // namespace rwn::platform::windows

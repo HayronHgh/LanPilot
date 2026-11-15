@@ -1,15 +1,25 @@
 # An explicit allowlist for the end-user desktop bundle. The engineering CPack
 # install remains independent. Stage with --component desktop, never copy out/.
 if(WIN32 AND TARGET rwn-viewer)
-  install(TARGETS rwn-viewer RUNTIME DESTINATION bin
+  include("${PROJECT_SOURCE_DIR}/packaging/windows/Setup.cmake")
+  install(TARGETS LanPilot-Setup RUNTIME DESTINATION .
+    COMPONENT desktop EXCLUDE_FROM_ALL)
+  install(TARGETS rwn-viewer rwn-maintenance-launcher LanPilot RUNTIME DESTINATION bin
     COMPONENT desktop EXCLUDE_FROM_ALL)
   install(PROGRAMS
     "${PROJECT_SOURCE_DIR}/packaging/windows/Install-DesktopPreview.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Maintain-LanPilotTrust.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Invoke-LanPilotTrustMaintenance.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Register-LanPilotMaintenance.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/TrustMaintenance.psm1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/ProductInstall.psm1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Start-LanPilotBootstrap.ps1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Start-DesktopPreview.ps1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Start-LanPilot.ps1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Start-LanPilotTls.ps1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/TlsConnectionSettings.psm1"
     "${PROJECT_SOURCE_DIR}/packaging/windows/Uninstall-DesktopPreview.ps1"
+    "${PROJECT_SOURCE_DIR}/packaging/windows/Update-LanPilotTrustBundle.ps1"
     DESTINATION bin COMPONENT desktop EXCLUDE_FROM_ALL)
 elseif(APPLE AND TARGET rwn-desktop-agent)
   install(TARGETS rwn-desktop-agent RUNTIME DESTINATION bin
