@@ -1,4 +1,5 @@
 #pragma once
+#include "rwn/core/cancellation.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -12,33 +13,6 @@
 #include <vector>
 
 namespace rwn::core {
-
-class CancellationToken {
-public:
-  CancellationToken() = default;
-
-  [[nodiscard]] bool stop_requested() const noexcept {
-        return state_ != nullptr && state_->load(std::memory_order_acquire);
-    }
-
-private:
-    friend class CancellationSource;
-    explicit CancellationToken(std::shared_ptr<std::atomic_bool> state)
-        : state_(std::move(state)) {}
-    std::shared_ptr<std::atomic_bool> state_;
-};
-
-class CancellationSource {
-public:
-    CancellationSource() : state_(std::make_shared<std::atomic_bool>(false)) {}
-    [[nodiscard]] CancellationToken token() const { return CancellationToken(state_); }
-    bool request_stop() noexcept {
-        return !state_->exchange(true, std::memory_order_acq_rel);
-    }
-
-private:
-    std::shared_ptr<std::atomic_bool> state_;
-};
 
 struct CommandSpec {
     std::vector<std::string> argv;

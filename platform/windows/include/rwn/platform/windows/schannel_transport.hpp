@@ -2,6 +2,7 @@
 
 #include "rwn/transport/encrypted_fallback.hpp"
 #include "rwn/transport/tls_byte_channel.hpp"
+#include "rwn/core/cancellation.hpp"
 
 #include <array>
 #include <chrono>
@@ -29,6 +30,9 @@ struct SchannelFallbackClientOptions {
     // Empty preserves existing system-chain validation.
     std::vector<std::byte> exclusive_root_der{};
     std::vector<std::byte> exclusive_crl_der{};
+    // Connection establishment only. Every new session gets its own source;
+    // ongoing session shutdown is still owned by TlsByteChannel::cancel().
+    core::CancellationToken establishment_stop{};
 };
 
 void validate_schannel_fallback_client_options(

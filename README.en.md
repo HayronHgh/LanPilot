@@ -1,5 +1,13 @@
 # LanPilot
 
+[Architecture and simplification decision](doc/architecture.md) · [Engineering study guide (繁體中文)](doc/engineering-study-guide.zh-TW.md)
+
+![Desktop session and optional SSH workspace](doc/assets/lanpilot-architecture.svg)
+
+Installation and persistent in-place updates are being consolidated. See the
+[current product status and acceptance gates](doc/product-status.md).
+Clean-machine one-time setup has not passed acceptance yet.
+
 LanPilot lets a Windows computer view and control a Mac desktop over a local network. The current implementation uses C++23 and CMake, ScreenCaptureKit on macOS, and a D3D11 viewer on Windows. Other host/client combinations are not implemented yet.
 
 The Windows viewer keeps the remote image centered and proportional when its window is resized or maximized. Unused space appears as black bars. `Ctrl+F` selects Fit; `Ctrl+1` selects 1:1 pixels when the window is large enough.
@@ -13,8 +21,6 @@ The Windows viewer keeps the remote image centered and proportional when its win
 | v0.3 | Exact updates over separate TLS visual and control sockets; agent access stays on SSH | Current development line |
 
 These lines describe the project's evolution. They are not downloadable release tags. A signed installer, first-time pairing flow, and final two-host acceptance are still in progress. See [release readiness](doc/release-readiness.md).
-
-The [connection reliability roadmap](doc/connection-reliability.md) diagrams the channel architecture, current renewal failure path, planned recovery states, and review gates. It distinguishes published code from installed development results and future work.
 
 ## Build and verify
 

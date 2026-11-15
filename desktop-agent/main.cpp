@@ -1,3 +1,7 @@
+#include "agent_entry.hpp"
+#include "shutdown.hpp"
+#include "stdio_shutdown.hpp"
+#include "run_audit.hpp"
 #include "rwn/core/process_isolation.hpp"
 #include "rwn/core/content_hash.hpp"
 
@@ -91,11 +95,14 @@ double maximum_ms(const std::vector<double>& samples) {
         : *std::ranges::max_element(samples);
 }
 
-bool read_stdin_exact(const std::span<std::byte> output) {
+bool read_stdin_exact(const std::span<std::byte> output,
+                      rwn::core::CancellationToken stop, bool standard_input) {
+    if (standard_input) return rwn::agent::read_control_fd(STDIN_FILENO, output, stop);
+    if (stop.stop_requested()) return false;
     std::cin.read(
         reinterpret_cast<char*>(output.data()),
         static_cast<std::streamsize>(output.size()));
-    return std::cin.gcount() ==
+    return !stop.stop_requested() && std::cin.gcount() ==
         static_cast<std::streamsize>(output.size());
 }
 
@@ -113,7 +120,7 @@ int stream_preview_stdio(
 #if defined(__APPLE__)
     rwn::platform::macos::MacosDesktopPermissionBackend permissions;
     if (permissions.status().capture != rwn::desktop::PermissionState::granted) {
-        permissions.request_capture();
+        rwn::agent::request_cli_permission(permissions,false);
         std::cerr << "grant Screen Recording to rwn-desktop-agent and retry\n";
         return 2;
     }
@@ -171,18 +178,33 @@ int stream_h264_stdio(
     const bool raw_rect_experimental,
     const bool h264_only_explicit,
     const bool exact_only,
-    const std::function<void()>& cancel_network = {}) {
+    const std::function<void()>& cancel_network = {},
+    const std::function<void(std::span<const std::byte>)>& receive_clipboard = {},
+    const rwn::core::CancellationToken process_stop = {}) {
 #if defined(__APPLE__)
+    rwn::core::CancellationSource stream_stop;
+    rwn::core::CancellationCallback process_cancel(process_stop, [&] { stream_stop.request_stop(); });
+    const auto stop = stream_stop.token();
+    rwn::core::CancellationCallback interrupt_network(stop, [&] { if (cancel_network) cancel_network(); });
+    if (stop.stop_requested()) return 0;
+    std::unique_ptr<rwn::agent::StoppableOutput> standard_output;
+    std::streambuf* original_output{};
+    if (!cancel_network) {
+        standard_output = std::make_unique<rwn::agent::StoppableOutput>(STDOUT_FILENO, stop);
+        original_output = std::cout.rdbuf(standard_output.get());
+    }
+    rwn::agent::OnExit restore_output([&] { if (original_output) std::cout.rdbuf(original_output); });
     const auto vt_mode = parse_vt_mode(vt_mode_value);
+    rwn::agent::observe_stream_endpoint();
     rwn::platform::macos::MacosDesktopPermissionBackend permissions;
     if (permissions.status().capture != rwn::desktop::PermissionState::granted) {
-        permissions.request_capture();
+        rwn::agent::request_cli_permission(permissions,false);
         std::cerr << "grant Screen Recording to rwn-desktop-agent and retry\n";
         return 2;
     }
     if (interactive &&
         permissions.status().input != rwn::desktop::PermissionState::granted) {
-        permissions.request_input();
+        rwn::agent::request_cli_permission(permissions,true);
         std::cerr << "grant Accessibility to rwn-desktop-agent and retry\n";
         return 2;
     }
@@ -220,6 +242,11 @@ int stream_h264_stdio(
     std::mutex diagnostics_mutex;
     std::atomic_bool stop_trace_writer{};
     std::thread trace_writer;
+    rwn::agent::OnExit finish_trace([&] {
+        if (trace_queue) trace_queue->close();
+        stop_trace_writer.store(true);
+        if (trace_writer.joinable()) trace_writer.join();
+    });
     if (visual_trace) {
         trace_writer = std::thread([&] {
             while (!stop_trace_writer.load() || trace_queue->size() != 0) {
@@ -278,13 +305,23 @@ int stream_h264_stdio(
     std::unique_ptr<rwn::platform::macos::MacosInputBackend> input_backend;
     std::unique_ptr<rwn::desktop::InputReceiver> input_receiver;
     std::atomic_bool control_disconnected{};
+    std::atomic_bool input_release_ok{true};
+    std::unique_ptr<rwn::agent::InputOwnerAudit> input_audit;
     std::thread input_worker;
+    rwn::agent::OnExit finish_input([&] {
+        stream_stop.request_stop();
+        if (input_worker.joinable()) input_worker.join();
+    });
     if (interactive || cancel_network) {
         input_backend =
             std::make_unique<rwn::platform::macos::MacosInputBackend>();
         input_receiver =
             std::make_unique<rwn::desktop::InputReceiver>(*input_backend);
+        input_audit=std::make_unique<rwn::agent::InputOwnerAudit>();
         input_worker = std::thread([&] {
+            rwn::agent::OnExit close_input_audit([&] {
+                static_cast<void>(input_audit->finish_on_owner(*input_receiver));
+            });
             try {
                 const rwn::core::AuthorizationResult authorization{
                     .principal_matched = true,
@@ -295,10 +332,10 @@ int stream_h264_stdio(
                     .denied = {},
                 };
                 std::uint64_t last_sequence{};
-                while (std::cin.good()) {
+                while (!stop.stop_requested() && std::cin.good()) {
                     std::array<std::byte,
                         rwn::desktop::reverse_control_header_size> wire{};
-                    if (!read_stdin_exact(wire)) break;
+                    if (!read_stdin_exact(wire, stop, !cancel_network)) break;
                     const auto header =
                         rwn::desktop::decode_reverse_control_header(wire);
                     if (header.sequence != last_sequence + 1U) {
@@ -307,13 +344,17 @@ int stream_h264_stdio(
                     }
                     last_sequence = header.sequence;
                     std::vector<std::byte> payload(header.payload_size);
-                    if (!read_stdin_exact(payload)) {
+                    if (!read_stdin_exact(payload, stop, !cancel_network)) {
+                        if (stop.stop_requested()) break;
                         throw std::invalid_argument(
                             "truncated reverse control payload");
                     }
                     const auto bytes_received_at_us = monotonic_timestamp_us();
                     rwn::desktop::validate_reverse_control_payload(
                         header, payload);
+                    // No old buffered event can reopen input after stop. A stop
+                    // racing an in-progress injection is drained by this owner.
+                    if (stop.stop_requested()) break;
                     if (!interactive && (header.type == rwn::desktop::ReverseControlType::input_event ||
                         header.type == rwn::desktop::ReverseControlType::release_all_input))
                         throw std::invalid_argument("view-only TLS session forbids input");
@@ -360,6 +401,11 @@ int stream_h264_stdio(
                         continue;
                     }
                     switch (header.type) {
+                        case rwn::desktop::ReverseControlType::text_clipboard:
+                            if(!interactive || !receive_clipboard)
+                                throw std::invalid_argument("clipboard is not authorized for this session");
+                            receive_clipboard(payload);
+                            break;
                         case rwn::desktop::ReverseControlType::input_event: {
                             const auto reliable = input_event->kind !=
                                 rwn::desktop::InputKind::pointer_move;
@@ -428,22 +474,39 @@ int stream_h264_stdio(
                         }
                     }
                 }
-                static_cast<void>(input_receiver->release_all_input());
-                // EOF ends an interactive session even on a static desktop:
-                // no future encoded frame may arrive to discover broken stdout.
-                control_disconnected.store(true, std::memory_order_release);
-                if (cancel_network) cancel_network();
             } catch (...) {
-                static_cast<void>(input_receiver->release_all_input());
-                std::lock_guard lock(worker_error_mutex);
-                worker_error = std::current_exception();
-                control_disconnected.store(true, std::memory_order_release);
-                if (cancel_network) cancel_network();
+                if (!stop.stop_requested()) {
+                    std::lock_guard lock(worker_error_mutex);
+                    worker_error = std::current_exception();
+                }
             }
+            // Terminal, not a reusable RELEASE_ALL epoch: no buffered input is
+            // accepted after this point. Continue releasing after one failure.
+            auto receipt = input_receiver->close();
+            auto released = receipt.released;
+            if (receipt.remaining != 0) {
+                receipt = input_receiver->close();
+                released += receipt.released;
+            }
+            input_release_ok.store(receipt.remaining == 0);
+            {
+                std::lock_guard lock(diagnostics_mutex);
+                std::cerr << "RWN_INPUT_DRAIN terminal=1 released="
+                    << released
+                    << " remaining=" << receipt.remaining << '\n';
+            }
+            // EOF or failure ends a static session without waiting for video.
+            control_disconnected.store(true, std::memory_order_release);
+            stream_stop.request_stop();
         });
     }
     std::atomic_bool stop_encoder_worker{};
     std::thread encoder_worker;
+    rwn::agent::OnExit finish_encoder([&] {
+        stop_encoder_worker.store(true);
+        if (!exact_only) encoder.stop_submissions();
+        if (encoder_worker.joinable()) encoder_worker.join();
+    });
     if (exact_only) {
         std::lock_guard lock(diagnostics_mutex);
         std::cerr << "RWN_EXACT_ONLY codec_encoder=not_started"
@@ -578,6 +641,11 @@ int stream_h264_stdio(
         visual_protocol && (interactive || cancel_network) && !h264_only_explicit;
     std::unique_ptr<
         rwn::platform::macos::MacosMetalDirtyTileAnalyzer> exact_analyzer;
+    rwn::agent::OnExit finish_dirty([&] {
+        stop_dirty_worker.store(true);
+        capture.enable_dirty_analysis(false);
+        if (dirty_worker.joinable()) dirty_worker.join();
+    });
     if (dirty_analysis || snapshot_enabled) {
         exact_analyzer = std::make_unique<
             rwn::platform::macos::MacosMetalDirtyTileAnalyzer>();
@@ -639,6 +707,10 @@ int stream_h264_stdio(
     std::atomic_uint64_t cursor_replaced{};
     std::atomic_bool stop_cursor_worker{};
     std::thread cursor_worker;
+    rwn::agent::OnExit finish_cursor([&] {
+        stop_cursor_worker.store(true);
+        if (cursor_worker.joinable()) cursor_worker.join();
+    });
     if (visual_protocol) {
         cursor_worker = std::thread([&] {
             try {
@@ -687,6 +759,10 @@ int stream_h264_stdio(
     }
     std::atomic_bool stop_visual_watchdog{};
     std::thread visual_watchdog;
+    rwn::agent::OnExit finish_watchdog([&] {
+        stop_visual_watchdog.store(true);
+        if (visual_watchdog.joinable()) visual_watchdog.join();
+    });
     if (visual_trace) {
         visual_watchdog = std::thread([&] {
             std::optional<rwn::desktop::VisualLivenessWatchdog> watchdog;
@@ -987,7 +1063,7 @@ int stream_h264_stdio(
         representation_epoch.load(), monotonic_us());
     auto last_replaced_frames = capture.replaced_frame_count();
     auto last_queue_stats = encoder_queue_stats();
-    while (std::cout.good() &&
+    while (!stop.stop_requested() && std::cout.good() &&
            !control_disconnected.load(std::memory_order_acquire)) {
         {
             std::lock_guard lock(worker_error_mutex);
@@ -1924,28 +2000,14 @@ int stream_h264_stdio(
             last_queue_stats = queue_stats;
         }
     }
-    stop_encoder_worker.store(true);
-    if (!exact_only) encoder.stop_submissions();
-    if (encoder_worker.joinable()) encoder_worker.join();
-    stop_dirty_worker.store(true);
-    capture.enable_dirty_analysis(false);
-    if (dirty_worker.joinable()) dirty_worker.join();
-    stop_cursor_worker.store(true);
-    if (cursor_worker.joinable()) cursor_worker.join();
-    if (visual_watchdog.joinable()) {
-        stop_visual_watchdog.store(true);
-        visual_watchdog.join();
-    }
-    if (trace_queue) trace_queue->close();
-    if (trace_writer.joinable()) {
-        stop_trace_writer.store(true);
-        trace_writer.join();
-    }
-    if (input_worker.joinable()) {
-        if (cancel_network) cancel_network();
-        else ::close(STDIN_FILENO);
-        input_worker.join();
-    }
+    finish_input.run();
+    finish_encoder.run();
+    finish_dirty.run();
+    finish_cursor.run();
+    finish_watchdog.run();
+    finish_trace.run();
+    if (!input_release_ok.load()) return 74;
+    if (worker_error) std::rethrow_exception(worker_error);
     return 0;
 #else
     static_cast<void>(maximum_width);
@@ -1961,6 +2023,8 @@ int stream_h264_stdio(
     static_cast<void>(h264_only_explicit);
     static_cast<void>(exact_only);
     static_cast<void>(cancel_network);
+    static_cast<void>(receive_clipboard);
+    static_cast<void>(process_stop);
     std::cerr << "H.264 preview server is supported only on macOS\n";
     return 2;
 #endif
@@ -2148,7 +2212,12 @@ int probe_audio_runtime(
 
 }  // namespace
 
-int main(const int argc, char** argv) {
+int rwn::agent::run(const int argc, char** argv,const std::function<std::vector<std::byte>()>& native_client_status,
+    const std::vector<std::byte>& native_root,rwn::core::CancellationToken credential_rollover) {
+#if !defined(__APPLE__)
+    (void)native_client_status;
+    (void)native_root;(void)credential_rollover;
+#endif
     try {
 #if defined(__APPLE__)
         rwn::platform::macos::require_process_identity(
@@ -2168,10 +2237,13 @@ int main(const int argc, char** argv) {
             throw std::invalid_argument("local TLS identity setup requires macOS");
 #endif
         }
-        if ((argc == 9 || argc == 10) && std::string_view(argv[1]) == "--stream-visual-tls") {
+        if ((argc == 9 || argc == 10 || argc == 11) && std::string_view(argv[1]) == "--stream-visual-tls") {
 #if defined(__APPLE__)
             const std::string_view control = argv[7];
             const std::string_view mode = argv[8];
+            const bool clipboard=argc==11 && std::string_view(argv[10])=="--clipboard-text";
+            if(argc==11 && (!clipboard || control!="interactive"))
+                throw std::invalid_argument("clipboard requires explicit interactive local policy");
             if ((control != "view-only" && control != "interactive") ||
                 (mode != "h264-only" && mode != "exact-only"))
                 throw std::invalid_argument("invalid TLS desktop mode");
@@ -2181,14 +2253,27 @@ int main(const int argc, char** argv) {
             options.identity.keychain_persistent_reference = rwn::preview::TlsPreviewSession::identity(argv[4]);
             options.identity.allowed_peer_certificate_sha256 = {
                 rwn::transport::parse_apple_network_sha256_fingerprint(argv[5])};
+            rwn::agent::ProcessShutdown shutdown;
+            rwn::core::CancellationSource process_stop;
+            rwn::core::CancellationCallback signal_stop(shutdown.token(),[&]{process_stop.request_stop();});
+            rwn::core::CancellationCallback renewal_stop(credential_rollover,[&]{process_stop.request_stop();});
+            bool stream_entered{};
+            rwn::agent::observe_stream_endpoint();
+            try {
             rwn::preview::TlsPreviewSession network(options,argv[2],
-                rwn::preview::TlsPreviewSession::read_root(argv[6]),control == "interactive",
-                argc == 10 ? rwn::preview::TlsPreviewSession::read_root(argv[9])
-                           : std::vector<std::byte>{});
+                native_root.empty()?rwn::preview::TlsPreviewSession::read_root(argv[6]):native_root,control == "interactive",
+                argc >= 10 ? rwn::preview::TlsPreviewSession::read_root(argv[9])
+                           : std::vector<std::byte>{},clipboard,process_stop.token(),native_client_status);
+            rwn::core::CancellationCallback interrupt(process_stop.token(), [&] { network.cancel(); });
             std::cerr << "RWN_TRANSPORT visual=tls control=tls agent=ssh session_ttl_s=1800 control_idle_timeout_s=30\n";
+            stream_entered = true;
             return stream_h264_stdio(1920,1080,60,20000,"baseline",true,false,false,
                 control == "interactive",mode == "exact-only",mode == "h264-only",mode == "exact-only",
-                [&] { network.cancel(); });
+                [&] { network.cancel(); },[&](std::span<const std::byte> payload){network.receive_clipboard(payload);},network.token());
+            } catch (...) {
+                if (!stream_entered && process_stop.token().stop_requested()) return 0;
+                throw;
+            }
 #else
             throw std::invalid_argument("TLS desktop server requires macOS");
 #endif
@@ -2246,6 +2331,12 @@ int main(const int argc, char** argv) {
                 throw std::invalid_argument(
                     "exact framebuffer updates require interactive stream");
             }
+#if defined(__APPLE__)
+            rwn::agent::ProcessShutdown shutdown;
+            const auto process_stop = shutdown.token();
+#else
+            const rwn::core::CancellationToken process_stop;
+#endif
             return stream_h264_stdio(
                 parse_u32(argv[2], 320, rwn::desktop::maximum_preview_width,
                           "preview width"),
@@ -2264,7 +2355,7 @@ int main(const int argc, char** argv) {
                 command == "--stream-visual-interactive-stdio" ||
                     command == "--stream-visual-interactive-trace-stdio",
                 raw_rect_experimental || exact_only, h264_only_explicit,
-                exact_only);
+                exact_only, {}, {}, process_stop);
         }
         if (argc != 1) {
             std::cerr << "usage: rwn-desktop-agent [--probe-desktop | "

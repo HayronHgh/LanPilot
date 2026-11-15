@@ -376,6 +376,7 @@ enum class ReverseControlType : std::uint8_t {
     request_full_snapshot = 3,
     frame_commit_ack = 4,
     ping = 5,
+    text_clipboard = 6,
 };
 
 struct ReverseControlHeader {
@@ -468,6 +469,10 @@ public:
 
 class InputReceiver {
 public:
+    struct CloseReceipt {
+        std::size_t released{};
+        std::size_t remaining{};
+    };
     explicit InputReceiver(InputBackend& backend) : backend_(backend) {}
     [[nodiscard]] bool receive(
         const InputEvent& event, bool reliable,
@@ -476,6 +481,9 @@ public:
         std::uint64_t now_us, std::chrono::milliseconds maximum_hold);
     [[nodiscard]] std::size_t release_all_keys();
     [[nodiscard]] std::size_t release_all_input();
+    // Single input-owner thread only. Terminal gate closes before any release;
+    // failed releases remain tracked for a bounded retry, never reopen input.
+    [[nodiscard]] CloseReceipt close() noexcept;
     [[nodiscard]] bool accept_input_epoch(
         std::uint64_t epoch, bool release_all);
     [[nodiscard]] std::uint64_t input_epoch() const noexcept {
@@ -489,6 +497,7 @@ private:
     std::map<std::uint32_t, std::uint64_t> pressed_keys_;
     std::set<std::uint8_t> pressed_buttons_;
     std::uint64_t input_epoch_{1};
+    bool closed_{};
 };
 
 enum class VisualRepresentation : std::uint8_t {

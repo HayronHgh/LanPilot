@@ -1,4 +1,5 @@
 #include "rwn/desktop/desktop.hpp"
+#include "rwn/desktop/text_clipboard.hpp"
 
 #include "rwn/core/content_hash.hpp"
 
@@ -220,7 +221,7 @@ void validate_visual_header(const VisualMessageHeader& header) {
 void validate_reverse_control_header(const ReverseControlHeader& header) {
     const auto type = static_cast<std::uint8_t>(header.type);
     if (type < static_cast<std::uint8_t>(ReverseControlType::input_event) ||
-        type > static_cast<std::uint8_t>(ReverseControlType::ping) ||
+        type > static_cast<std::uint8_t>(ReverseControlType::text_clipboard) ||
         header.flags != 0 || header.input_epoch == 0 || header.sequence == 0 ||
         header.occurred_at_us == 0 ||
         header.payload_size > maximum_reverse_control_payload) {
@@ -516,6 +517,9 @@ void validate_reverse_control_payload(
         throw std::invalid_argument("reverse control payload size mismatch");
     }
     switch (header.type) {
+        case ReverseControlType::text_clipboard:
+            static_cast<void>(decode_text_clipboard(payload));
+            return;
         case ReverseControlType::input_event:
             if (payload.empty()) {
                 throw std::invalid_argument("input control payload is empty");
@@ -1331,6 +1335,7 @@ InputEvent decode_input_event(const std::span<const std::byte> bytes) {
 bool InputReceiver::receive(
     const InputEvent& event, const bool reliable,
     const core::AuthorizationResult& authorization) {
+    if (closed_) return false;
     if (!authorization.permits(core::Capability::desktop_control)) {
         throw std::logic_error("desktop control capability is required");
     }
@@ -1432,8 +1437,30 @@ std::size_t InputReceiver::release_all_input() {
     return key_count + button_count;
 }
 
+InputReceiver::CloseReceipt InputReceiver::close() noexcept {
+    closed_ = true;
+    CloseReceipt result;
+    for (auto key = pressed_keys_.begin(); key != pressed_keys_.end();) {
+        try {
+            backend_.raw_key(key->first, false);
+            key = pressed_keys_.erase(key);
+            ++result.released;
+        } catch (...) { ++key; }
+    }
+    for (auto button = pressed_buttons_.begin(); button != pressed_buttons_.end();) {
+        try {
+            backend_.pointer_button(*button, false);
+            button = pressed_buttons_.erase(button);
+            ++result.released;
+        } catch (...) { ++button; }
+    }
+    result.remaining = pressed_keys_.size() + pressed_buttons_.size();
+    return result;
+}
+
 bool InputReceiver::accept_input_epoch(
     const std::uint64_t epoch, const bool release_all) {
+    if (closed_) return false;
     if (epoch == 0) {
         throw std::invalid_argument("input epoch is zero");
     }

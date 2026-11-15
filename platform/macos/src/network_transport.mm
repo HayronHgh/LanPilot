@@ -1,5 +1,6 @@
 #include "rwn/platform/macos/network_transport.hpp"
 #include "rwn/platform/macos/tcp_listener.hpp"
+#include "rwn/platform/macos/enrollment_identity.hpp"
 
 #include "rwn/core/content_hash.hpp"
 
@@ -87,6 +88,8 @@ private:
 
 [[nodiscard]] SecIdentityRef load_identity(
     const std::span<const std::byte> persistent_reference) {
+    if(is_enrollment_identity_reference(persistent_reference))
+        return load_enrollment_identity(persistent_reference);
     const CfOwner<CFDataRef> reference(CFDataCreate(
         kCFAllocatorDefault,
         reinterpret_cast<const UInt8*>(persistent_reference.data()),
@@ -249,6 +252,7 @@ struct StreamSignal {
     std::mutex mutex;
     std::condition_variable condition;
     bool complete{};
+    bool cancelled{};
     bool end_of_stream{};
     std::string error;
     std::vector<std::byte> content;
@@ -894,9 +898,10 @@ void check_tcp_timeout(std::chrono::milliseconds timeout) {
 class AppleTlsByteChannel final : public TlsByteChannel {
 public:
     AppleTlsByteChannel(nw_connection_t connection, AuthenticatedPeerEvidence peer,
-                        std::chrono::milliseconds timeout)
+                        std::chrono::milliseconds timeout, rwn::core::CancellationToken stop = {})
         : connection_(connection), peer_(peer) {
         const auto signal = std::make_shared<StreamSignal>();
+        state_signal_ = signal;
         const auto queue = dispatch_queue_create("lanpilot.tcp.channel", DISPATCH_QUEUE_SERIAL);
         nw_connection_set_queue(connection_, queue);
         nw_connection_set_state_changed_handler(connection_, ^(nw_connection_state_t state, nw_error_t error) {
@@ -909,6 +914,7 @@ public:
             signal->condition.notify_all();
         });
         nw_connection_start(connection_);
+        rwn::core::CancellationCallback interrupt(stop, [this] { cancel(); });
         try {
             wait(signal, timeout);
             const auto metadata = nw_connection_copy_protocol_metadata(connection_, nw_protocol_copy_tls_definition());
@@ -930,6 +936,7 @@ public:
         std::scoped_lock lock(write_mutex_);
         require_open();
         const auto signal = std::make_shared<StreamSignal>();
+        track_signal(write_signal_, signal);
         nw_connection_send(connection_, make_dispatch_data(bytes), NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT,
             true, ^(nw_error_t error) {
                 std::lock_guard guard(signal->mutex);
@@ -944,6 +951,7 @@ public:
         std::scoped_lock lock(read_mutex_);
         require_open();
         const auto signal = std::make_shared<StreamSignal>();
+        track_signal(read_signal_, signal);
         nw_connection_receive(connection_, 1, static_cast<std::uint32_t>(tls_channel_write_limit),
             ^(dispatch_data_t data, nw_content_context_t, bool complete, nw_error_t error) {
                 std::lock_guard guard(signal->mutex);
@@ -961,13 +969,30 @@ public:
         return std::move(signal->content);
     }
     void cancel() noexcept override {
-        if (!cancelled_.exchange(true)) nw_connection_cancel(connection_);
+        if (cancelled_.exchange(true)) return;
+        nw_connection_cancel(connection_);
+        // Local cancellation cannot depend on a later native I/O callback.
+        std::lock_guard lock(pending_mutex_);
+        for (const auto& signal : {state_signal_, read_signal_, write_signal_}) {
+            if (!signal) continue;
+            std::lock_guard guard(signal->mutex);
+            signal->cancelled = true;
+            signal->complete = true;
+            signal->condition.notify_all();
+        }
     }
 private:
+    void track_signal(std::shared_ptr<StreamSignal>& slot,
+                      const std::shared_ptr<StreamSignal>& signal) {
+        std::lock_guard lock(pending_mutex_);
+        require_open();
+        slot = signal;
+    }
     static void wait(const std::shared_ptr<StreamSignal>& signal, std::chrono::milliseconds timeout) {
         std::unique_lock lock(signal->mutex);
         if (!signal->condition.wait_for(lock, timeout, [&] { return signal->complete; }))
             throw std::runtime_error("TCP operation timed out");
+        if (signal->cancelled) throw std::runtime_error("TCP channel cancelled");
         if (!signal->error.empty()) throw std::runtime_error(signal->error);
     }
     void require_open() const {
@@ -977,12 +1002,15 @@ private:
     AuthenticatedPeerEvidence peer_;
     std::atomic<bool> cancelled_{};
     std::mutex read_mutex_, write_mutex_;
+    std::mutex pending_mutex_;
+    std::shared_ptr<StreamSignal> state_signal_, read_signal_, write_signal_;
 };
 struct TcpListenerState {
     std::mutex mutex;
     std::condition_variable condition;
     std::deque<nw_connection_t> pending;
     bool closed{};
+    bool ready{};
 };
 }
 
@@ -990,7 +1018,7 @@ class DedicatedTlsListener::Impl {
 public:
     Impl(AppleNetworkServerOptions options, const std::string& address,
          std::vector<std::byte> exclusive_root_der,
-         std::vector<std::byte> client_ocsp_response_der)
+         std::vector<std::byte> client_ocsp_response_der,std::function<std::vector<std::byte>()> native_status_provider)
         : state_(std::make_shared<TcpListenerState>()) {
         validate_apple_network_server_options(options);
         if (client_ocsp_response_der.size() > 64U * 1024U ||
@@ -1032,8 +1060,8 @@ public:
             sec_protocol_options_set_verify_block(security,
                 ^(sec_protocol_metadata_t, sec_trust_t trust, sec_protocol_verify_complete_t complete) {
                     bool accepted = false;
-                    try { accepted = verify_peer(trust, false, {}, allowlist,
-                        exclusive_root_der, true, client_ocsp_response_der); } catch (...) {}
+                    try { const auto response=native_status_provider?native_status_provider():client_ocsp_response_der;
+                        accepted = verify_peer(trust, false, {}, allowlist,exclusive_root_der, true, response); } catch (...) {}
                     complete(accepted);
                 }, verify_queue);
         }, ^(nw_protocol_options_t tcp) { nw_tcp_options_set_no_delay(tcp, true); });
@@ -1052,6 +1080,7 @@ public:
         nw_listener_set_new_connection_limit(listener_, static_cast<std::uint32_t>(limit));
         nw_listener_set_state_changed_handler(listener_, ^(nw_listener_state_t status, nw_error_t) {
             std::lock_guard lock(state->mutex);
+            if (status == nw_listener_state_ready) state->ready = true;
             if (status == nw_listener_state_failed || status == nw_listener_state_cancelled) state->closed = true;
             state->condition.notify_all();
         });
@@ -1064,6 +1093,14 @@ public:
         nw_listener_start(listener_);
     }
     ~Impl() { cancel(); }
+    void wait_ready(std::chrono::milliseconds timeout, rwn::core::CancellationToken stop) {
+        check_tcp_timeout(timeout);
+        rwn::core::CancellationCallback interrupt(stop, [this] { cancel(); });
+        std::unique_lock lock(state_->mutex);
+        if (!state_->condition.wait_for(lock, timeout, [&] { return state_->closed || state_->ready; }))
+            throw std::runtime_error("TCP listener readiness timeout");
+        if (state_->closed) throw std::runtime_error("TCP listener closed before readiness");
+    }
     void cancel() noexcept {
         std::lock_guard lock(state_->mutex);
         // Failure may already have set closed; still release pending sockets.
@@ -1074,9 +1111,11 @@ public:
         nw_listener_cancel(listener_);
     }
     std::unique_ptr<TlsByteChannel> try_accept(std::chrono::milliseconds idle_timeout,
-                                              std::chrono::milliseconds handshake_timeout) {
+                                              std::chrono::milliseconds handshake_timeout,
+                                              rwn::core::CancellationToken stop) {
         check_tcp_timeout(idle_timeout);
         check_tcp_timeout(handshake_timeout);
+        rwn::core::CancellationCallback interrupt(stop, [this] { cancel(); });
         nw_connection_t connection{};
         {
             std::unique_lock lock(state_->mutex);
@@ -1087,10 +1126,11 @@ public:
             connection = state_->pending.front();
             state_->pending.pop_front();
         }
-        return std::make_unique<AppleTlsByteChannel>(connection, peer_, handshake_timeout);
+        return std::make_unique<AppleTlsByteChannel>(connection, peer_, handshake_timeout, stop);
     }
-    std::unique_ptr<TlsByteChannel> accept(std::chrono::milliseconds timeout) {
+    std::unique_ptr<TlsByteChannel> accept(std::chrono::milliseconds timeout, rwn::core::CancellationToken stop) {
         check_tcp_timeout(timeout);
+        rwn::core::CancellationCallback interrupt(stop, [this] { cancel(); });
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         nw_connection_t connection{};
         {
@@ -1102,7 +1142,7 @@ public:
         }
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         if (remaining.count() <= 0) { nw_connection_cancel(connection); throw std::runtime_error("TCP handshake timeout"); }
-        return std::make_unique<AppleTlsByteChannel>(connection, peer_, remaining);
+        return std::make_unique<AppleTlsByteChannel>(connection, peer_, remaining, stop);
     }
     std::uint16_t port() const noexcept { return nw_listener_get_port(listener_); }
 private:
@@ -1112,9 +1152,9 @@ private:
 };
 DedicatedTlsListener::DedicatedTlsListener(AppleNetworkServerOptions options, std::string address,
                                          std::vector<std::byte> exclusive_root_der,
-                                         std::vector<std::byte> client_ocsp_response_der)
+                                         std::vector<std::byte> client_ocsp_response_der,std::function<std::vector<std::byte>()> native_status_provider)
     : impl_(std::make_unique<Impl>(std::move(options), address,
-          std::move(exclusive_root_der), std::move(client_ocsp_response_der))) {}
+          std::move(exclusive_root_der), std::move(client_ocsp_response_der),std::move(native_status_provider))) {}
 DedicatedTlsListener::~DedicatedTlsListener() = default;
 void verify_local_tls_identity(const std::vector<std::byte>& reference,
                                const bool allow_user_interaction) {
@@ -1203,12 +1243,13 @@ bool probe_desktop_client_trust(const std::vector<std::byte>& certificate_der,
     return verify_peer(wrapped, false, {}, {leaf_fingerprint(trust.get())},
         root_der, true, ocsp_der, false);
 }
-std::unique_ptr<TlsByteChannel> DedicatedTlsListener::accept(std::chrono::milliseconds timeout) { return impl_->accept(timeout); }
+std::unique_ptr<TlsByteChannel> DedicatedTlsListener::accept(std::chrono::milliseconds timeout, rwn::core::CancellationToken stop) { return impl_->accept(timeout, stop); }
 std::unique_ptr<TlsByteChannel> DedicatedTlsListener::try_accept(
-    std::chrono::milliseconds idle_timeout, std::chrono::milliseconds handshake_timeout) {
-    return impl_->try_accept(idle_timeout, handshake_timeout);
+    std::chrono::milliseconds idle_timeout, std::chrono::milliseconds handshake_timeout, rwn::core::CancellationToken stop) {
+    return impl_->try_accept(idle_timeout, handshake_timeout, stop);
 }
 void DedicatedTlsListener::cancel() noexcept { impl_->cancel(); }
+void DedicatedTlsListener::wait_ready(std::chrono::milliseconds timeout, rwn::core::CancellationToken stop) { impl_->wait_ready(timeout, stop); }
 std::uint16_t DedicatedTlsListener::listen_port() const noexcept { return impl_->port(); }
 
 }  // namespace rwn::platform::macos

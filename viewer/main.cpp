@@ -1,10 +1,14 @@
 #include "rwn/desktop/desktop.hpp"
 #include "rwn/desktop/snapshot_upload.hpp"
 #include "rwn/desktop/visual_trace.hpp"
+#include "rwn/desktop/session_reconnect.hpp"
 #include "rwn/core/content_hash.hpp"
 #include "rwn/platform/windows/desktop_runtime.hpp"
 #include "d3d11_renderer.hpp"
 #include "tls_preview.hpp"
+#include "connection_startup.hpp"
+#include "pairing_client.hpp"
+#include "rwn/platform/windows/enrollment_status.hpp"
 
 #include <Windows.h>
 #include <shellapi.h>
@@ -41,6 +45,9 @@ namespace {
 
 constexpr UINT status_changed_message = WM_APP + 2U;
 constexpr UINT cursor_changed_message = WM_APP + 3U;
+constexpr UINT reconnect_requested_message = WM_APP + 4U;
+constexpr int reconnect_session_exit = 75;
+constexpr UINT text_clipboard_menu = 0x1fb0U;
 constexpr std::size_t snapshot_gpu_upload_batch_bytes = 1024U * 1024U;
 
 std::wstring utf8_to_utf16(const std::string_view value) {
@@ -87,6 +94,8 @@ std::uint32_t parse_u32(
 
 struct ViewerLaunchOptions {
     bool tls{};
+    bool native_status{};
+    bool launcher_managed_errors{};
     rwn::platform::windows::SchannelFallbackClientOptions tls_options;
     rwn::transport::TransportEndpoint tls_endpoint;
     std::wstring host;
@@ -101,6 +110,7 @@ struct ViewerLaunchOptions {
     bool dirty_analysis{};
     bool visual_trace{};
     bool interactive{};
+    bool text_clipboard{};
     bool extreme_present{};
     bool lan_quality{};
     bool raw_rect_experimental{};
@@ -121,7 +131,7 @@ ViewerLaunchOptions parse_launch_options(
     }
     ViewerLaunchOptions options;
     if (std::wstring_view(argv[1]) == L"--tls") {
-        if (argc != 10 && argc != 12) throw std::invalid_argument("TLS viewer arguments invalid");
+        if(argc<10 || argc>18 || (argc-10)%2)throw std::invalid_argument("TLS viewer arguments invalid");
         using Connection = rwn::viewer::TlsPreviewConnection;
         options.tls = true;
         options.tls_endpoint = {Connection::ascii(argv[2]),
@@ -142,10 +152,18 @@ ViewerLaunchOptions parse_launch_options(
         options.h264_only_explicit = !options.exact_only;
         options.visual_protocol = options.lan_quality = true;
         options.maximum_width=1920; options.maximum_height=1080; options.frames_per_second=60;
-        if (argc == 12) {
-            if (std::wstring_view(argv[10]) != L"--probe-seconds") throw std::invalid_argument("invalid TLS probe flag");
-            options.probe_seconds = parse_u32(argv[11],1,60,"probe seconds");
+        for(int i=10;i<argc;i+=2){
+            if(std::wstring_view(argv[i])==L"--native-status" && std::wstring_view(argv[i+1])==L"required" && !options.native_status)
+                options.native_status=true;
+            else if(std::wstring_view(argv[i])==L"--probe-seconds" && !options.probe_seconds)
+                options.probe_seconds=parse_u32(argv[i+1],1,60,"probe seconds");
+            else if(std::wstring_view(argv[i])==L"--clipboard" && std::wstring_view(argv[i+1])==L"text" && !options.text_clipboard)
+                options.text_clipboard=true;
+            else if(std::wstring_view(argv[i])==L"--startup-ui" && std::wstring_view(argv[i+1])==L"launcher" && !options.launcher_managed_errors)
+                options.launcher_managed_errors=true;
+            else throw std::invalid_argument("invalid TLS viewer option");
         }
+        if(options.text_clipboard && !options.interactive)throw std::invalid_argument("clipboard requires interactive permission");
         return options;
     }
     options.host = argv[1];
@@ -491,6 +509,23 @@ HCURSOR create_hardware_cursor(
 }
 
 struct ViewerState {
+    static inline std::atomic_uintptr_t next_connection_instance{1};
+    const std::uintptr_t connection_instance=next_connection_instance.fetch_add(1);
+    bool allow_reconnect{};
+    bool user_closed{};
+    std::atomic_bool retry_forbidden{};
+    std::atomic_bool connection_usable{true};
+    std::atomic_bool resume_control_required{};
+    bool consume_resume_button_up{};
+    void report_tls_failure(const std::exception& error){
+        connection_usable=false;
+        const auto* interrupted=dynamic_cast<const rwn::transport::TlsTransportInterrupted*>(&error);
+        if(!interrupted){retry_forbidden.store(true);tls_runtime_failed.store(true);if(tls)tls->cancel();return;}
+        if(stopping)return;
+        tls_runtime_failed.store(true);
+        if(interrupted->reason()==rwn::transport::TlsTransportInterrupted::Reason::cancelled)return;
+        if(allow_reconnect && window)PostMessageW(window,reconnect_requested_message,connection_instance,0);
+    }
     std::mutex mutex;
     std::condition_variable_any compositor_ready;
     std::shared_ptr<const DisplayFrame> frame;
@@ -529,10 +564,15 @@ struct ViewerState {
     std::jthread error_reader;
     std::jthread compositor;
     std::jthread control_writer;
+    std::unique_ptr<rwn::platform::windows::WindowsClipboardBackend> clipboard_backend;
+    std::unique_ptr<rwn::desktop::TextClipboardPump> clipboard;
+    std::jthread clipboard_reader;
+    bool clipboard_enabled{};
     std::mutex control_mutex;
     std::condition_variable_any control_ready;
     std::deque<PendingControlMessage> reliable_control;
     std::optional<PendingControlMessage> pointer_control;
+    std::optional<PendingControlMessage> clipboard_control;
     std::uint64_t next_control_order{};
     std::uint64_t next_wire_sequence{};
     std::uint64_t next_reliable_input_sequence{};
@@ -614,7 +654,9 @@ struct ViewerState {
             std::lock_guard lock(control_mutex);
             message.order = ++next_control_order;
             message.input_epoch = input_epoch;
-            if (pointer_latest) {
+            if(message.type==rwn::desktop::ReverseControlType::text_clipboard){
+                clipboard_control=std::move(message); // One low-priority latest clipboard state.
+            } else if (pointer_latest) {
                 if (pointer_control && pointer_control->input_correlation_id != 0U) {
                     superseded_correlation = pointer_control->input_correlation_id;
                     superseded_epoch = pointer_control->input_epoch;
@@ -683,6 +725,7 @@ struct ViewerState {
     }
 
     void enqueue_input(rwn::desktop::InputEvent event) {
+        if(resume_control_required || !connection_usable)return;
         const auto pointer_latest =
             event.kind == rwn::desktop::InputKind::pointer_move;
         event.sequence = pointer_latest
@@ -867,13 +910,15 @@ struct ViewerState {
             std::lock_guard lock(mutex);
             status = std::move(value);
             title = std::wstring(L"Remote Workspace Viewer [") +
-                (interactive ? L"CONTROL" : L"VIEW ONLY") + L"] - " + status;
+                (interactive ? (resume_control_required?L"CONTROL PAUSED - click to resume":L"CONTROL") : L"VIEW ONLY") + L"] - " + status;
         }
         if (window != nullptr) PostMessageW(window, status_changed_message, 0, 0);
     }
 
     void stop() {
         if (stopping.exchange(true)) return;
+        if(clipboard)clipboard->set_enabled(false);
+        if(clipboard_reader.joinable())clipboard_reader.request_stop();
         if (tls_heartbeat.joinable()) tls_heartbeat.request_stop();
         if (tls || (interactive && input_write != nullptr)) {
             {
@@ -892,6 +937,19 @@ struct ViewerState {
             if (control_writer.joinable()) control_writer.join();
         }
         if (tls) tls->cancel();
+        if(clipboard_reader.joinable())clipboard_reader.join();
+        if(clipboard){
+            auto retiring=std::move(clipboard);
+            std::atomic_bool retired{};
+            std::thread retire([&]{retiring.reset();retired.store(true);});
+            // Clipboard APIs may synchronously notify the owner window. Keep
+            // servicing sent messages while joining; do not dispatch queued input.
+            while(!retired.load()){
+                MSG sent{};PeekMessageW(&sent,nullptr,0,0,PM_NOREMOVE);Sleep(1);
+            }
+            retire.join();
+        }
+        clipboard_backend.reset();
         if (tls_heartbeat.joinable()) tls_heartbeat.join();
         if (compositor.joinable()) compositor.request_stop();
         compositor_ready.notify_all();
@@ -1326,7 +1384,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
             } catch (const std::exception& error) {
                 state.renderer->cancel_full_snapshot();
                 if (state.tls && !state.stopping) {
-                    state.tls_runtime_failed.store(true);
+                    state.report_tls_failure(error);
                     std::cerr << "tls_runtime_error stage=snapshot reason=" << error.what() << '\n';
                 }
                 state.renderer->cancel_framebuffer_update();
@@ -1441,7 +1499,7 @@ void compositor_loop(ViewerState& state, const std::stop_token stop) {
         } catch (const std::exception& error) {
             handled_revision = revision;
             if (state.tls && !state.stopping) {
-                state.tls_runtime_failed.store(true);
+                state.report_tls_failure(error);
                 std::cerr << "tls_runtime_error stage=render reason=" << error.what() << '\n';
             }
             state.rendered_revision.store(
@@ -1461,10 +1519,11 @@ void control_writer_loop(ViewerState& state) {
                 state.control_ready.wait(lock, [&] {
                     return state.control_closing ||
                         state.pointer_control.has_value() ||
+                        state.clipboard_control.has_value() ||
                         !state.reliable_control.empty();
                 });
                 if (!state.pointer_control &&
-                    state.reliable_control.empty()) {
+                    state.reliable_control.empty() && !state.clipboard_control) {
                     if (state.control_closing) break;
                     continue;
                 }
@@ -1475,9 +1534,13 @@ void control_writer_loop(ViewerState& state) {
                 if (pointer_first) {
                     message = std::move(*state.pointer_control);
                     state.pointer_control.reset();
-                } else {
+                } else if(!state.reliable_control.empty()) {
                     message = std::move(state.reliable_control.front());
                     state.reliable_control.pop_front();
+                } else {
+                    message=std::move(*state.clipboard_control);
+                    message.input_epoch=state.input_epoch;
+                    state.clipboard_control.reset();
                 }
                 wire_sequence = ++state.next_wire_sequence;
             }
@@ -1530,7 +1593,7 @@ void control_writer_loop(ViewerState& state) {
     } catch (const std::exception& error) {
         if (state.tls) {
             if (!state.stopping) {
-                state.tls_runtime_failed.store(true);
+                state.report_tls_failure(error);
                 std::cerr << "tls_runtime_error stage=control reason=" << error.what() << '\n';
             }
             state.tls->cancel();
@@ -2215,7 +2278,7 @@ void frame_reader_loop(
                               << snapshot.committed_generation << L"/"
                               << snapshot.present_submitted_generation;
                     }
-                    state.title = title.str();
+                    state.title = (state.resume_control_required?L"[Click picture to resume control] ":L"")+title.str();
                     last_rendered = rendered;
                     last_replacements = replacements;
                     state.decoded_ready_to_present_ms.clear();
@@ -2247,12 +2310,12 @@ void frame_reader_loop(
         }
         if (!state.stopping) {
             state.set_status(L"Mac preview stream ended");
-            if (state.tls) state.tls_runtime_failed.store(true);
+            if (state.tls) state.report_tls_failure(rwn::transport::TlsTransportInterrupted(rwn::transport::TlsTransportInterrupted::Reason::closed,"Mac stream ended"));
         }
         if (state.tls) state.tls->cancel();
     } catch (const std::exception& error) {
         if (state.tls && !state.stopping) {
-            state.tls_runtime_failed.store(true);
+            state.report_tls_failure(error);
             std::cerr << "tls_runtime_error stage=visual_read reason=" << error.what() << '\n';
         }
         if (!state.stopping) {
@@ -2598,7 +2661,7 @@ private:
         }
         auto* state = reinterpret_cast<ViewerState*>(
             GetWindowLongPtrW(window_, GWLP_USERDATA));
-        if (state == nullptr || !state->interactive) {
+        if (state == nullptr || !state->interactive || state->resume_control_required || !state->connection_usable) {
             return CallNextHookEx(hook_, HC_ACTION, message, detail);
         }
 
@@ -2663,6 +2726,17 @@ LRESULT CALLBACK window_procedure(
             window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     switch (message) {
+        case reconnect_requested_message:
+            if(state && wparam==state->connection_instance && state->allow_reconnect &&
+               !state->retry_forbidden && !state->user_closed){
+                state->stop();
+                if(state->retry_forbidden)state->set_status(L"Connection stopped by an error. Automatic retry is disabled.");
+                else PostQuitMessage(reconnect_session_exit);
+            }
+            return 0;
+        case WM_CLOSE:
+            if(state)state->user_closed=true;
+            DestroyWindow(window);return 0;
         case WM_GETMINMAXINFO: {
             const auto dpi = GetDpiForWindow(window);
             RECT minimum{0, 0, MulDiv(480, static_cast<int>(dpi), 96),
@@ -2725,6 +2799,15 @@ LRESULT CALLBACK window_procedure(
         case WM_MBUTTONDOWN:
         case WM_MBUTTONUP:
             if (state != nullptr && state->interactive) {
+                if(!state->connection_usable)return 0;
+                if(state->resume_control_required){
+                    if(message==WM_LBUTTONDOWN){
+                        state->resume_control_required=false;state->consume_resume_button_up=true;
+                        SetFocus(window);state->focus_acquired();state->set_status(L"Connected. Control resumed.");
+                    }
+                    return 0;
+                }
+                if(message==WM_LBUTTONUP && state->consume_resume_button_up){state->consume_resume_button_up=false;return 0;}
                 const auto button =
                     message == WM_LBUTTONDOWN || message == WM_LBUTTONUP
                     ? 1U : message == WM_RBUTTONDOWN ||
@@ -2785,6 +2868,7 @@ LRESULT CALLBACK window_procedure(
             break;
         case cursor_changed_message:
             if (state != nullptr && state->interactive) {
+                if(state->resume_control_required || !state->connection_usable)return 0;
                 HCURSOR cursor{};
                 bool visible{};
                 {
@@ -2798,6 +2882,9 @@ LRESULT CALLBACK window_procedure(
         case WM_SETCURSOR:
             if (state != nullptr && state->interactive &&
                 LOWORD(lparam) == HTCLIENT) {
+                if(state->resume_control_required || !state->connection_usable){
+                    SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));return TRUE;
+                }
                 HCURSOR cursor{};
                 bool visible{};
                 {
@@ -2815,6 +2902,11 @@ LRESULT CALLBACK window_procedure(
                 {
                     std::lock_guard lock(state->mutex);
                     title = state->title;
+                }
+                if(state->clipboard){
+                    title+=state->clipboard->failed ? L" | Clipboard unavailable" :
+                        state->clipboard->active() ? L" | Clipboard ON" :
+                        state->clipboard_enabled ? L" | Clipboard starting" : L" | Clipboard OFF";
                 }
                 SetWindowTextW(window, title.c_str());
             }
@@ -2852,7 +2944,17 @@ LRESULT CALLBACK window_procedure(
             if (state != nullptr) state->stop();
             PostQuitMessage(0);
             return 0;
+        case WM_SYSCOMMAND:
+            if((wparam&0xfff0U)==text_clipboard_menu && state && state->clipboard){
+                state->clipboard_enabled=!state->clipboard_enabled;
+                state->clipboard->set_enabled(state->clipboard_enabled);
+                CheckMenuItem(GetSystemMenu(window,FALSE),text_clipboard_menu,
+                    MF_BYCOMMAND|(state->clipboard_enabled?MF_CHECKED:MF_UNCHECKED));
+                return 0;
+            }
+            break;
         case WM_TIMER:
+            if(wparam==0x4350U){PostMessageW(window,status_changed_message,0,0);return 0;}
             if (wparam == 0x52574eU) {
                 KillTimer(window, wparam);
                 PostMessageW(window, WM_CLOSE, 0, 0);
@@ -2865,59 +2967,40 @@ LRESULT CALLBACK window_procedure(
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-}  // namespace
 
-int WINAPI wWinMain(
-    HINSTANCE instance, HINSTANCE, PWSTR, const int show_command) {
-    bool hidden_probe{};
-    try {
-        static_cast<void>(SetProcessDpiAwarenessContext(
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
-        int argc{};
-        auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        if (argv == nullptr) throw std::runtime_error("parse command line failed");
-        for (int index = 1; index < argc; ++index)
-            if (std::wstring_view(argv[index]) == L"--probe-seconds") hidden_probe = true;
-        if (argc < 4) {
-            LocalFree(argv);
-            if (hidden_probe) return 64;
-            MessageBoxW(
-                nullptr,
-                L"Usage: rwn-viewer.exe <user@host> <absolute-ssh-key> "
-                L"<absolute-remote-rwn-desktop-agent> "
-                 L"--profile lan-quality [--control view] "
-                 L"[--present balanced] [--scale 1:1|fit] "
-                 L"[--hybrid h264|snapshot-only|raw-rect-experimental] "
-                 L"[--evidence pixel-quality] "
-                 L"[--trace absolute-new-trace.jsonl]\n\nLegacy: "
-                 L"[max-width max-height fps "
-                 L"[baseline|low-latency|delay-1|delay-0] "
-                 L"[legacy|visual|visual-analyze|visual-trace] "
-                 L"[absolute-new-trace.jsonl]]",
-                L"Remote Workspace Viewer", MB_OK | MB_ICONINFORMATION);
-            return 64;
+bool wait_for_reconnect(HWND window,std::chrono::milliseconds delay){
+    SetWindowTextW(window,L"LanPilot - Reconnecting to your paired Mac... Close this window to cancel.");
+    InvalidateRect(window,nullptr,TRUE);
+    const auto deadline=std::chrono::steady_clock::now()+delay;
+    while(IsWindow(window)){
+        MSG message{};
+        while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
+            if(message.message==WM_QUIT)return false;
+            TranslateMessage(&message);DispatchMessageW(&message);
         }
-        ViewerLaunchOptions options;
-        try {
-            options = parse_launch_options(argc, argv);
-        } catch (...) {
-            LocalFree(argv);
-            throw;
-        }
-        LocalFree(argv);
+        if(!IsWindow(window))return false;
+        const auto remaining=std::chrono::ceil<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
+        if(remaining.count()<=0)return true;
+        if(MsgWaitForMultipleObjectsEx(0,nullptr,static_cast<DWORD>(remaining.count()),QS_ALLINPUT,MWMO_INPUTAVAILABLE)==WAIT_FAILED)
+            throw std::runtime_error("reconnect wait failed");
+    }
+    return false;
+}
 
-        const wchar_t class_name[] = L"RwnPreviewWindow";
-        WNDCLASSW window_class{};
-        window_class.lpfnWndProc = window_procedure;
-        window_class.hInstance = instance;
-        window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-        window_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        window_class.lpszClassName = class_name;
-        if (!RegisterClassW(&window_class)) {
-            throw std::runtime_error("register viewer window failed");
-        }
+void discard_session_input(HWND window){
+    MSG message{};
+    // Only this viewer's queued input is retired. Other applications' input and
+    // system state are untouched. No old event becomes input for a new session.
+    while(PeekMessageW(&message,window,WM_KEYFIRST,WM_KEYLAST,PM_REMOVE)){}
+    while(PeekMessageW(&message,window,WM_MOUSEFIRST,WM_MOUSELAST,PM_REMOVE)){}
+}
 
+int run_viewer_session(HINSTANCE instance,ViewerLaunchOptions options,int show_command,HWND& window,bool resumed,
+    std::optional<rwn::desktop::SessionReconnectPolicy::Clock::time_point>& connected_at){
+    constexpr wchar_t class_name[]=L"RwnPreviewWindow";
         ViewerState state;
+        state.allow_reconnect=options.tls && !options.probe_seconds && !options.visual_trace;
+        state.resume_control_required=resumed && options.interactive;
         state.visual_protocol = options.visual_protocol;
         state.interactive = options.interactive;
         state.video_liveness_enabled.store(
@@ -2958,20 +3041,35 @@ int WINAPI wWinMain(
                 static_cast<LONG>(std::lround(native_width * scale)) + border_width,
                 static_cast<LONG>(std::lround(native_height * scale)) + border_height};
         }
-        const auto window = CreateWindowExW(
+        const bool created=window==nullptr;
+        if(created) window = CreateWindowExW(
             0, class_name, L"Remote Workspace Viewer - View Only",
             window_style, CW_USEDEFAULT, CW_USEDEFAULT,
             desired_window.right - desired_window.left,
             desired_window.bottom - desired_window.top,
             nullptr, nullptr, instance, &state);
         if (window == nullptr) throw std::runtime_error("create viewer window failed");
+        state.window=window;
+        if(resumed)discard_session_input(window);
+        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&state));
+        struct Attachment {
+            ViewerState& state;HWND window;
+            ~Attachment(){state.stop();KillTimer(window,0x4350U);
+                if(IsWindow(window)){SetWindowLongPtrW(window,GWLP_USERDATA,0);
+                    if(GetForegroundWindow()==window)SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));}}
+        } attachment{state,window};
+        if(created){
+            AppendMenuW(GetSystemMenu(window,FALSE),MF_SEPARATOR,0,nullptr);
+            AppendMenuW(GetSystemMenu(window,FALSE),MF_STRING|MF_GRAYED,text_clipboard_menu,
+                L"Sync text clipboard (this connection)");
+        }else EnableMenuItem(GetSystemMenu(window,FALSE),text_clipboard_menu,MF_BYCOMMAND|MF_GRAYED);
         std::optional<FocusedKeyboardCapture> keyboard_capture;
         if (!options.tls && options.interactive && options.probe_seconds == 0)
             keyboard_capture.emplace(window);
         if (options.visual_trace) {
             state.initialize_visual_trace(options.visual_trace_path);
         }
-        if (options.probe_seconds == 0) {
+        if (options.probe_seconds == 0 && created && !options.tls) {
             ShowWindow(window, show_command);
             UpdateWindow(window);
         }
@@ -2981,11 +3079,51 @@ int WINAPI wWinMain(
                 compositor_loop(state, stop);
             });
         if (options.tls) {
-            state.tls = std::make_unique<rwn::viewer::TlsPreviewConnection>(
-                options.tls_options,options.tls_endpoint,options.interactive);
+            state.connection_usable=false;
+            rwn::viewer::ConnectionStartup<std::unique_ptr<rwn::viewer::TlsPreviewConnection>> startup(
+                [options](rwn::core::CancellationToken stop)mutable{
+                    options.tls_options.establishment_stop=stop;
+                    if(options.native_status)options.tls_options=rwn::platform::windows::refresh_native_credentials(options.tls_options,options.tls_endpoint,stop);
+                    return std::make_unique<rwn::viewer::TlsPreviewConnection>(options.tls_options,options.tls_endpoint,options.interactive);
+                });
+            if(!rwn::viewer::wait_for_connection(window,startup,[&]{return !state.stopping && !state.retry_forbidden;})){
+                if(state.retry_forbidden && !state.user_closed)throw std::runtime_error("Viewer initialization failed while connecting. No connection was activated.");
+                return options.probe_seconds?3:0;
+            }
+            state.tls=startup.take();
+            if(options.probe_seconds==0 && created){ShowWindow(window,show_command);UpdateWindow(window);}
+            state.connection_usable=true;
+            connected_at=rwn::desktop::SessionReconnectPolicy::Clock::now();
+            if(resumed)discard_session_input(window);
+            if(resumed)state.set_status(L"Reconnected. Click once in the picture to resume control.");
+            if(options.text_clipboard && !state.tls->clipboard_allowed())
+                throw std::runtime_error("Mac has not enabled text clipboard sharing. Update/authorize the Mac agent first.");
             if (options.interactive && options.probe_seconds == 0)
                 keyboard_capture.emplace(window);
             state.control_writer = std::jthread([&state] { control_writer_loop(state); });
+            if(state.tls->clipboard_allowed()){
+                if(!SetTimer(window,0x4350U,250,nullptr))throw std::runtime_error("clipboard status timer failed");
+                state.clipboard_backend=std::make_unique<rwn::platform::windows::WindowsClipboardBackend>(window);
+                state.clipboard=std::make_unique<rwn::desktop::TextClipboardPump>(false,true,rwn::desktop::TextClipboardCallbacks{
+                    [&]{return state.clipboard_backend->change_token();},
+                    [&]{return state.clipboard_backend->read_available_utf8_text();},
+                    [&](std::string_view value){state.clipboard_backend->write_utf8_text(value);},
+                    [&](const rwn::desktop::TextClipboardMessage& update){state.enqueue_control({
+                        .type=rwn::desktop::ReverseControlType::text_clipboard,
+                        .payload=rwn::desktop::encode_text_clipboard(update),
+                        .occurred_at_us=steady_timestamp_us()},false);}});
+                state.clipboard_enabled=options.text_clipboard && !resumed;
+                state.clipboard->set_enabled(state.clipboard_enabled);
+                EnableMenuItem(GetSystemMenu(window,FALSE),text_clipboard_menu,MF_BYCOMMAND|MF_ENABLED);
+                CheckMenuItem(GetSystemMenu(window,FALSE),text_clipboard_menu,
+                    MF_BYCOMMAND|(state.clipboard_enabled?MF_CHECKED:MF_UNCHECKED));
+                state.clipboard_reader=std::jthread([&state](std::stop_token stop){
+                    try{while(!stop.stop_requested() && !state.stopping){
+                        const auto update=state.tls->read_clipboard();
+                        if(update)state.clipboard->receive(*update);
+                    }}catch(const std::exception& error){if(!state.stopping){state.report_tls_failure(error);state.tls->cancel();}}
+                });
+            }
             state.frame_reader = std::jthread([&state,&options] {
                 frame_reader_loop(state,true,options.raw_rect_experimental,options.exact_only);
             });
@@ -2996,7 +3134,7 @@ int WINAPI wWinMain(
                     if (++ticks == 50) {
                         ticks=0;
                         try { state.enqueue_heartbeat(); }
-                        catch (...) { state.tls->cancel(); break; }
+                        catch (const std::exception& error) { state.report_tls_failure(error);state.tls->cancel(); break; }
                     }
                 }
             });
@@ -3027,8 +3165,90 @@ int WINAPI wWinMain(
                 !state.tls_runtime_failed.load() ? 0 : 3;
         }
         return static_cast<int>(message.wParam);
+}
+
+}  // namespace
+
+int WINAPI wWinMain(
+    HINSTANCE instance, HINSTANCE, PWSTR, const int show_command) {
+    bool hidden_probe{},launcher_managed_errors{};
+    try {
+        static_cast<void>(SetProcessDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
+        int argc{};
+        auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv == nullptr) throw std::runtime_error("parse command line failed");
+        if(argc==2 && std::wstring_view(argv[1])==L"--check-pairing-layout"){
+            LocalFree(argv);return run_pairing_client_ui(L"127.0.0.1",true);
+        }
+        if(argc==3 && std::wstring_view(argv[1])==L"--pair"){
+            const std::wstring address(argv[2]);LocalFree(argv);return run_pairing_client_ui(address);
+        }
+        for (int index = 1; index < argc; ++index)
+            if (std::wstring_view(argv[index]) == L"--probe-seconds") hidden_probe = true;
+        if (argc < 4) {
+            LocalFree(argv);
+            if (hidden_probe) return 64;
+            MessageBoxW(
+                nullptr,
+                L"Usage: rwn-viewer.exe <user@host> <absolute-ssh-key> "
+                L"<absolute-remote-rwn-desktop-agent> "
+                 L"--profile lan-quality [--control view] "
+                 L"[--present balanced] [--scale 1:1|fit] "
+                 L"[--hybrid h264|snapshot-only|raw-rect-experimental] "
+                 L"[--evidence pixel-quality] "
+                 L"[--trace absolute-new-trace.jsonl]\n\nLegacy: "
+                 L"[max-width max-height fps "
+                 L"[baseline|low-latency|delay-1|delay-0] "
+                 L"[legacy|visual|visual-analyze|visual-trace] "
+                 L"[absolute-new-trace.jsonl]]",
+                L"Remote Workspace Viewer", MB_OK | MB_ICONINFORMATION);
+            return 64;
+        }
+        ViewerLaunchOptions options;
+        try {
+            options = parse_launch_options(argc, argv);
+        } catch (...) {
+            LocalFree(argv);
+            throw;
+        }
+        LocalFree(argv);
+
+        launcher_managed_errors=options.launcher_managed_errors;
+        const wchar_t class_name[] = L"RwnPreviewWindow";
+        WNDCLASSW window_class{};
+        window_class.lpfnWndProc = window_procedure;
+        window_class.hInstance = instance;
+        window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        window_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        window_class.lpszClassName = class_name;
+        if (!RegisterClassW(&window_class)) {
+            throw std::runtime_error("register viewer window failed");
+        }
+
+        HWND window{};
+        struct WindowOwner {HWND& value;~WindowOwner(){if(IsWindow(value))DestroyWindow(value);}} owner{window};
+        rwn::desktop::SessionReconnectPolicy reconnect;
+        bool resumed{};
+        for(;;){
+            std::optional<rwn::desktop::SessionReconnectPolicy::Clock::time_point> connected_at;
+            int result{};
+            try{result=run_viewer_session(instance,options,show_command,window,resumed,connected_at);}
+            catch(const rwn::transport::TlsTransportInterrupted& error){
+                if(!options.tls || !connected_at || options.probe_seconds || options.visual_trace ||
+                   error.reason()==rwn::transport::TlsTransportInterrupted::Reason::cancelled)throw;
+                result=reconnect_session_exit;
+            }
+            if(result!=reconnect_session_exit)return result;
+            if(connected_at)reconnect.connected(*connected_at);
+            const auto delay=reconnect.interrupted(rwn::desktop::SessionReconnectPolicy::Clock::now());
+            if(!delay)throw std::runtime_error("Unable to reconnect to the paired Mac. Check its power and LAN connection, then open LanPilot again. Your saved pairing is unchanged.");
+            std::cerr<<"tls_reconnect attempt="<<reconnect.attempts()<<" delay_ms="<<delay->count()<<" fresh_session=1 input_replay=0\n";
+            if(!wait_for_reconnect(window,*delay))return 0;
+            resumed=true;
+        }
     } catch (const std::exception& error) {
-        if (hidden_probe) {
+        if (hidden_probe || launcher_managed_errors) {
             std::cerr << "viewer_probe_failed=" << error.what() << '\n';
             return 1; // Never block an unattended probe on a modal UI.
         }

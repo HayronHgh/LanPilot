@@ -1,3 +1,4 @@
+#include "text_clipboard_tests.hpp"
 #include "rwn/core/authorization.hpp"
 #include "rwn/audio/audio.hpp"
 #include "rwn/client/session_client.hpp"
@@ -4494,9 +4495,11 @@ void exact_only_mode_rejects_lossy_and_unimplemented_representations() {
 }  // namespace
 
 #include "channel_session_tests.hpp"
+#include "pairing_consent_tests.hpp"
 
 int main() {
     rwn::test::Runner runner;
+    runner.run("pairing rejects unilateral stale cancelled and failed consent", pairing_consent_tests::security);
     runner.run("TCP channels reject untrusted cross-session and duplicate bindings", channel_tests::security);
     runner.run("build and artifact wire rejects forged evidence", build_and_artifact_wire_rejects_forged_evidence);
     runner.run("workspace control wire rejects unsafe transactions", workspace_control_wire_rejects_unsafe_transactions);
@@ -4527,6 +4530,7 @@ int main() {
     runner.run("encrypted fallback rejects downgrade and plane splicing", encrypted_fallback_rejects_downgrade_splicing_and_unbounded_io);
     runner.run("transport verification rejects forged evidence", transport_verification_rejects_forged_or_malformed_evidence);
     runner.run("view-only session blocks input and clipboard", desktop_control_is_denied_before_platform_or_transport_access);
+    runner.run("text clipboard policy framing size and replay boundaries",text_clipboard_tests::security);
     runner.run("input order and clipboard integrity enforced", input_order_clipboard_hash_and_replay_are_enforced);
     runner.run("workspace traversal rejected", workspace_traversal_and_absolute_paths_are_rejected);
     runner.run("workspace sibling prefix rejected", sibling_prefix_is_not_treated_as_workspace_child);

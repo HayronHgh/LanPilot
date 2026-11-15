@@ -999,20 +999,38 @@ void WindowsInputBackend::pointer_wheel(
 }
 
 std::string WindowsClipboardBackend::read_utf8_text() {
+    return read_available_utf8_text().value_or(std::string{});
+}
+
+std::uint64_t WindowsClipboardBackend::change_token() const {
+    return GetClipboardSequenceNumber();
+}
+
+std::optional<std::string> WindowsClipboardBackend::read_available_utf8_text() {
     if (!OpenClipboard(nullptr)) {
         throw std::runtime_error("OpenClipboard failed");
     }
     try {
+        const auto excluded=RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+        if(IsClipboardFormatAvailable(CF_HDROP) || (excluded && IsClipboardFormatAvailable(excluded))){
+            CloseClipboard();return std::nullopt;
+        }
         const auto handle = GetClipboardData(CF_UNICODETEXT);
         if (handle == nullptr) {
             CloseClipboard();
-            return {};
+            return std::nullopt;
         }
+        const auto bytes=GlobalSize(handle);
+        if(bytes<sizeof(wchar_t) || bytes>(desktop::maximum_clipboard_text_size+1)*sizeof(wchar_t) || bytes%sizeof(wchar_t))
+            throw std::runtime_error("clipboard text allocation outside bounds");
         const auto* text = static_cast<const wchar_t*>(GlobalLock(handle));
         if (text == nullptr) {
             throw std::runtime_error("GlobalLock clipboard data failed");
         }
-        const std::wstring value(text);
+        const auto count=bytes/sizeof(wchar_t);
+        const auto end=std::find(text,text+count,L'\0');
+        if(end==text+count){GlobalUnlock(handle);throw std::runtime_error("unterminated clipboard text");}
+        const std::wstring value(text,end);
         GlobalUnlock(handle);
         CloseClipboard();
         return utf16_to_utf8(value);
@@ -1023,6 +1041,9 @@ std::string WindowsClipboardBackend::read_utf8_text() {
 }
 
 void WindowsClipboardBackend::write_utf8_text(const std::string_view text) {
+    if(!owner_ || !IsWindow(static_cast<HWND>(owner_)) || text.size()>desktop::maximum_clipboard_text_size ||
+       !desktop::valid_utf8(text) || text.find('\0')!=std::string_view::npos)
+        throw std::invalid_argument("clipboard requires valid owner and bounded UTF-8 text");
     const auto wide = utf8_to_utf16(text);
     const auto bytes = (wide.size() + 1U) * sizeof(wchar_t);
     const auto handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
@@ -1037,7 +1058,7 @@ void WindowsClipboardBackend::write_utf8_text(const std::string_view text) {
     std::copy(wide.begin(), wide.end(), destination);
     destination[wide.size()] = L'\0';
     GlobalUnlock(handle);
-    if (!OpenClipboard(nullptr)) {
+    if (!OpenClipboard(static_cast<HWND>(owner_))) {
         GlobalFree(handle);
         throw std::runtime_error("OpenClipboard failed");
     }

@@ -104,8 +104,13 @@ public:
 
 class WindowsClipboardBackend final : public desktop::ClipboardBackend {
 public:
+    explicit WindowsClipboardBackend(void* owner=nullptr):owner_(owner){}
+    [[nodiscard]] std::uint64_t change_token() const;
+    [[nodiscard]] std::optional<std::string> read_available_utf8_text();
     [[nodiscard]] std::string read_utf8_text() override;
     void write_utf8_text(std::string_view text) override;
+private:
+    void* owner_{};
 };
 
 class WindowsDesktopPermissionBackend final : public desktop::DesktopPermissionBackend {

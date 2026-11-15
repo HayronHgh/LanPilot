@@ -1,6 +1,13 @@
 # LanPilot
 
+[架構與收斂決策](doc/architecture.md) · [工程學習與技術答辯](doc/engineering-study-guide.zh-TW.md)
+
+![桌面 Session 與按需 SSH 工作連線](doc/assets/lanpilot-architecture.svg)
+
 [English README](README.en.md)
+
+安裝、更新與持久化目前正在收斂；最新問題盤點與完整驗收門檻請讀
+[產品狀態與驗收門檻](doc/product-status.md)。尚未宣稱乾淨環境可一鍵部署。
 
 在區域網路上，從 Windows 操作 Mac。使用原生擷取、硬體 H.264 編解碼與 D3D11
 顯示，並研究用無損矩形更新改善文字畫質與小範圍操作延遲。
@@ -23,9 +30,6 @@ TLS TCP socket，Agent 維持 SSH；舊版 SSH 桌面路徑保留。
 版本線是發布規劃，不代表三個正式標籤或安裝包已存在。公開 Git 保留後續
 可審查的 commit，不逐一發布開發快照，也不匯入私人研究歷史。
 目前進度與最短發布路徑見 [發布就緒報告](doc/release-readiness.md)。
-
-連線維護的現況、背景續期設計與逐步驗收，見 [可視化持續性路線圖](doc/connection-reliability.zh-TW.md)。
-文件區分公開程式、本機開發驗證與尚待實作的功能。
 
 ## 安裝兩端
 

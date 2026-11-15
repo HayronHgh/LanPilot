@@ -31,6 +31,7 @@ struct ChannelGrants {
     // RWC1 ACK/recovery is allowed in view-only mode. Input is a separate,
     // locally authorized capability and never implied by socket admission.
     bool desktop_input{};
+    bool text_clipboard{}; // Independent server-local permission; default denied.
 };
 
 // Server-to-client only, on authenticated control TLS after both role echoes.
@@ -62,6 +63,8 @@ public:
                               Clock::time_point now) const;
     [[nodiscard]] bool input_allowed(std::uint64_t connection_id,
                                      Clock::time_point now) const;
+    [[nodiscard]] bool clipboard_allowed(std::uint64_t connection_id,
+                                        Clock::time_point now) const;
     // Losing either desktop channel invalidates ALL bindings. The runtime
     // must also release pressed input and cancel pending framebuffer state.
     void disconnect(std::uint64_t connection_id);

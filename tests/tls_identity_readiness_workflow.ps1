@@ -32,8 +32,12 @@ try {
     Reject {Assert-LanPilotClientIdentity $public} 'no associated private key'
     Reject {Assert-LanPilotClientIdentity $valid -NowUtc $valid.NotBefore.ToUniversalTime().AddTicks(-1)} 'not yet valid'
     Reject {Assert-LanPilotClientIdentity $valid -NowUtc $valid.NotAfter.ToUniversalTime()} 'expired'
+    Assert-LanPilotClientIdentity $valid -NowUtc $valid.NotAfter.ToUniversalTime() -AllowNativeRenewal
+    Reject {Assert-LanPilotClientIdentity $valid -NowUtc $valid.NotBefore.ToUniversalTime().AddTicks(-1) -AllowNativeRenewal} 'not yet valid'
+    Reject {Assert-LanPilotClientIdentity $public -AllowNativeRenewal} 'no associated private key'
     $server=New-Identity '1.3.6.1.5.5.7.3.1'
     Reject {Assert-LanPilotClientIdentity $server} 'client authentication'
+    Reject {Assert-LanPilotClientIdentity $server -AllowNativeRenewal} 'client authentication'
     $noEku=New-Identity ''
     Reject {Assert-LanPilotClientIdentity $noEku} 'client authentication'
     $ca=New-Identity '1.3.6.1.5.5.7.3.2' $true
