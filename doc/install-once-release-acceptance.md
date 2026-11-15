@@ -39,7 +39,7 @@ Revoked permissions and changes required by the OS are not silently bypassed.
    A home-domain first-install `.pkg` now has isolated build/expansion checks;
    see `macos-native-installer.md`. Its unsigned development output is not an
    activatable signed release and does not prove installed-user acceptance.
-   do not present the legacy CLI `desktop` package as the native product. Configure
+   do not present the legacy CLI `desktop-compat` package as the native product. Configure
    the expected Developer ID team and release-verification key, sign and validate
    the exact artifact, and complete the appropriate distribution checks. Empty
    publisher/update policy intentionally prevents production activation/updates.

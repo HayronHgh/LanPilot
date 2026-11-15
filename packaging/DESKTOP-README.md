@@ -7,6 +7,11 @@ must not be confused with the capabilities of an older installed package.
 See `doc/install-once-release-acceptance.md` in the corresponding source archive
 for the remaining delivery gates.
 
+The `desktop` component contains exactly one platform installer, this README and
+LICENSE. Runtime scripts are embedded in the Windows installer, not additional
+end-user launchers. Maintainer CLI tools are staged only when explicitly selecting
+`desktop-compat`. Do not merge these two packages into one download.
+
 ## Windows
 
 Double-click **LanPilot-Setup.exe** to install or update for your Windows account.
@@ -16,7 +21,7 @@ result, and does not open a console or start a connection automatically. Choose
 The package version appears in Windows Apps. Settings and device keys are retained.
 Local test builds are unsigned; release publisher signing remains required.
 
-For maintainer compatibility, the existing script entry remains available:
+In the separate `desktop-compat` bundle only, the maintainer script entry is:
 
 ~~~powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\Install-DesktopPreview.ps1
@@ -34,8 +39,8 @@ rights, install a root CA, create device keys or grant remote control.
 
 Open LanPilot, confirm the saved computer and choose Connect. Keyboard/mouse
 control and optional text clipboard synchronization require explicit consent.
-The default video mode is H.264; experimental exact/rectangle modes remain
-separate from release acceptance. Fit preserves the source aspect ratio and
+Updates preserve the saved visual/control mode, including Exact-only. H.264
+remains available; new profiles currently start in H.264. Fit preserves the source aspect ratio and
 centers the picture with black bars. Emergency escape: Ctrl+Alt+Shift+F12.
 
 **Fresh-machine acceptance remains open.** The current source connection UI can
@@ -80,7 +85,7 @@ The consumer first-install entry is a native macOS `.pkg`, staged separately:
 
 ~~~sh
 cmake --build <verified-build> --target lanpilot-macos-installer
-cmake --install <verified-build> --component macos-installer --prefix <staging-directory>
+cmake --install <verified-build> --component desktop --prefix <staging-directory>
 ~~~
 
 The default output is explicitly **LanPilot-macOS-UNSIGNED.pkg** for validation.
@@ -89,7 +94,7 @@ the current user's Applications folder and rejects existing canonical installs;
 it does not start services, change trust or request permissions. Signed updates
 remain in the installed app. See `doc/macos-native-installer.md` in the source.
 
-The native application is staged separately from the legacy `desktop` component:
+The app bundle itself can be staged separately for publisher verification:
 
 ~~~sh
 cmake --install <verified-build> --component macos-app --prefix <staging-directory>
@@ -109,7 +114,7 @@ agent or erase its identities merely because a staged bundle passes unit tests.
 
 ## Explicit Mac CLI compatibility package
 
-The `desktop` component on Mac remains the legacy CLI compatibility package:
+The `desktop-compat` component on Mac is the legacy CLI compatibility package:
 
 ~~~sh
 sh ./bin/install-desktop-preview.sh "$PWD/bin/rwn-desktop-agent"

@@ -1,5 +1,10 @@
 # LanPilot Desktop Local Installation
 
+This page describes the explicitly selected **legacy SSH compatibility** route.
+Stage its loose tools with `--component desktop-compat`; the current `desktop`
+component contains the graphical product installer. For the latest separate
+visual/control TLS route, start with [the product guide](public-guide.md).
+
 LanPilot retains `RemoteWorkspaceNode` installation directories and `rwn-*` binary
 names for compatibility with existing SSH commands and macOS permission grants.
 
