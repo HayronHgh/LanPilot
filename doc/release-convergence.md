@@ -4,18 +4,25 @@ This is the current work queue, not a completion announcement. The local
 research tree and installed personal pair remain separate from the public
 candidate. No cleanup may destroy the only working installation.
 
+The owner selected the stable latest architecture as the main line. Preserve
+the installed visual/control choices and the previous public source in
+[`legacy/pre-convergence-20261115`](https://github.com/HayronHgh/LanPilot/tree/legacy/pre-convergence-20261115).
+Promote source after CI; installer/public-distribution acceptance is a separate
+gate, not a reason to downgrade the current architecture.
+
 | Requirement | Current evidence | Next gate |
 | --- | --- | --- |
-| Simplify architecture | Documented one desktop session / two TLS sockets / optional SSH; existing session admission retained | Audit launcher/profile/service owners and remove only proven redundant paths |
-| Clean release source | Allowlisted current source exported, known-private-marker scan and Windows build/24 tests pass; missing installer resources fixed | Public commit CI, current-pair operational regression, obsolete entrypoint removal after replacement proof |
-| Visual explanation | Editable SVG architecture illustration, rendered and inspected | Keep diagram synchronized with any runtime changes |
-| GitHub and documentation | Candidate on the existing public history; README routes, index and implementation guides | Resolve CI findings, review candidate, then promote main; do not create a release tag before operational acceptance |
+| Simplify architecture | One desktop session / two TLS sockets / optional SSH; unused transport chooser removed; selected settings-root regression fixed | Retire installed legacy service only after replacement and rollback proof |
+| Clean release source | Allowlisted export, privacy checks, Windows/MSVC and Mac universal2 CI pass; missing installer resources fixed | Same-source personal packages and installation/update acceptance |
+| Visual explanation | Product cover plus editable architecture SVG, rendered and inspected | Keep assets synchronized with actual supported platforms |
+| GitHub and documentation | Latest source on existing public history; old main archived; bilingual homepage and implementation guides | Promote tested source to main; installer release tags require their own acceptance |
 | Engineering learning material | Traditional Chinese study guide, source map, Q&A, exercises and measurement template | Reconcile any changed contracts before release |
 
 ## Next tasks, in order
 
-1. Validate the exact public candidate with Windows/MSVC and native macOS CI.
-   Preserve failing logs; fix the first blocking issue rather than weakening tests.
+1. Promote the reviewed latest source after Windows/MSVC and Mac universal2 CI.
+   The routing fix passed both jobs in run 43668835646; verify the final documentation
+   head as well. Retain English commits and the archived previous public source.
 2. Produce matching personal packages from that identified source, with versions
    and SHA-256. Do not include personal connection profiles, identity references
    or machine-specific service configuration in a public download.
@@ -25,9 +32,10 @@ candidate. No cleanup may destroy the only working installation.
 4. Verify update preservation and rollback. Only then retire redundant installed
    launchers/services. Keeping a tested compatibility path is not a release defect;
    silently exposing multiple competing default launchers is.
-5. Promote the reviewed source to main and publish only the artifacts whose
-   gates passed. Signed/public first-install acceptance remains distinct from
-   unsigned, existing-pair personal acceptance.
+5. Publish only the installer artifacts whose gates passed. Signed/public
+   first-install acceptance remains distinct from unsigned, existing-pair
+   personal acceptance. Source on main is not a claim of completed distribution
+   acceptance.
 
 ## Deliberately unchanged
 
