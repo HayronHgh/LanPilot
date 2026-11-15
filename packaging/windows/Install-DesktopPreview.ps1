@@ -16,7 +16,7 @@ param(
     [string]$ConfigRoot = (Join-Path $env:LOCALAPPDATA 'LanPilot'),
     [switch]$ForceConfig,
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')]
-    [string]$ProductVersion = '0.1.0'
+    [string]$ProductVersion = '0.3.0'
 )
 
 Set-StrictMode -Version Latest

@@ -1,3 +1,12 @@
+if(RWN_BUILD_PACKAGING AND (WIN32 OR APPLE))
+  add_test(NAME lanpilot-desktop-package-workflow
+    COMMAND "${CMAKE_COMMAND}" "-DBUILD_ROOT=${PROJECT_BINARY_DIR}"
+      "-DCONFIG=$<CONFIG>" "-DHOST_SYSTEM=${CMAKE_SYSTEM_NAME}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_workflow.cmake")
+  set_tests_properties(lanpilot-desktop-package-workflow PROPERTIES
+    LABELS "workflow;packaging" TIMEOUT 240)
+endif()
+
 add_executable(rwn_process_fixture process_fixture.cpp)
 add_executable(lanpilot_enrollment_identity_workflow enrollment_identity_workflow.cpp)
 target_link_libraries(lanpilot_enrollment_identity_workflow PRIVATE rwn::core rwn_project_options)
