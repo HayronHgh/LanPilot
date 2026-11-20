@@ -10,6 +10,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -2305,15 +2306,48 @@ MacosCursorPositionSampler::sample_shape() const {
     }
 }
 
+std::uint64_t MacosInputBackend::event_flags(const std::uint32_t hid_usage) const {
+    // Generic modifier bit plus the device-dependent side bit hardware sets.
+    static constexpr std::array<std::pair<CGEventFlags, std::uint64_t>, 8> modifiers{{
+        {kCGEventFlagMaskControl, 0x0001U}, {kCGEventFlagMaskShift, 0x0002U},
+        {kCGEventFlagMaskAlternate, 0x0020U}, {kCGEventFlagMaskCommand, 0x0008U},
+        {kCGEventFlagMaskControl, 0x2000U}, {kCGEventFlagMaskShift, 0x0004U},
+        {kCGEventFlagMaskAlternate, 0x0040U}, {kCGEventFlagMaskCommand, 0x0010U},
+    }};
+    std::uint64_t flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) &
+        kCGEventFlagMaskAlphaShift;
+    for (std::size_t bit = 0; bit < modifiers.size(); ++bit) {
+        if ((held_modifiers_ & (1U << bit)) != 0) {
+            flags |= modifiers[bit].first | modifiers[bit].second;
+        }
+    }
+    // Fn is set only where Apple keyboards set it; letters never inherit it.
+    if (hid_usage >= 0x4fU && hid_usage <= 0x52U) {
+        flags |= kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad;
+    } else if ((hid_usage >= 0x3aU && hid_usage <= 0x4eU) ||
+               (hid_usage >= 0x68U && hid_usage <= 0x6fU)) {
+        flags |= kCGEventFlagMaskSecondaryFn;
+    } else if (hid_usage >= 0x53U && hid_usage <= 0x63U) {
+        flags |= kCGEventFlagMaskNumericPad;
+    }
+    return flags;
+}
+
 void MacosInputBackend::raw_key(
     const std::uint32_t hid_usage, const bool pressed) {
     if (hid_usage == 0x65U) {
         pointer_button(2, pressed);
         return;
     }
-    auto event = CGEventCreateKeyboardEvent(
-        nullptr, hid_usage_to_key_code(hid_usage), pressed);
+    const auto key_code = hid_usage_to_key_code(hid_usage);
+    if (hid_usage >= 0xe0U && hid_usage <= 0xe7U) {
+        const auto bit = static_cast<std::uint8_t>(1U << (hid_usage - 0xe0U));
+        if (pressed) held_modifiers_ |= bit;
+        else held_modifiers_ &= static_cast<std::uint8_t>(~bit);
+    }
+    auto event = CGEventCreateKeyboardEvent(nullptr, key_code, pressed);
     if (event == nullptr) throw std::runtime_error("create macOS key event failed");
+    CGEventSetFlags(event, static_cast<CGEventFlags>(event_flags(hid_usage)));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
 }
@@ -2364,6 +2398,7 @@ void MacosInputBackend::pointer_move(
     }
     auto event = CGEventCreateMouseEvent(nullptr, event_type, point, mouse_button);
     if (event == nullptr) throw std::runtime_error("create macOS pointer event failed");
+    CGEventSetFlags(event, static_cast<CGEventFlags>(event_flags(0)));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
 }
@@ -2396,6 +2431,7 @@ void MacosInputBackend::pointer_button(
         CGEventGetTimestamp(event) / 1000U,
         static_cast<std::uint64_t>([NSEvent doubleClickInterval] * 1'000'000.0));
     CGEventSetIntegerValueField(event, kCGMouseEventClickState, click_count);
+    CGEventSetFlags(event, static_cast<CGEventFlags>(event_flags(0)));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     const auto button_mask = static_cast<std::uint8_t>(1U << (button - 1U));
@@ -2418,6 +2454,7 @@ void MacosInputBackend::pointer_wheel(
     if (event == nullptr) {
         throw std::runtime_error("create macOS wheel event failed");
     }
+    CGEventSetFlags(event, static_cast<CGEventFlags>(event_flags(0)));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
 }

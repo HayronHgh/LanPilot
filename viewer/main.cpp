@@ -48,6 +48,7 @@ constexpr UINT cursor_changed_message = WM_APP + 3U;
 constexpr UINT reconnect_requested_message = WM_APP + 4U;
 constexpr int reconnect_session_exit = 75;
 constexpr UINT text_clipboard_menu = 0x1fb0U;
+constexpr UINT_PTR keyboard_state_timer = 0x4b53U;
 constexpr std::size_t snapshot_gpu_upload_batch_bytes = 1024U * 1024U;
 
 std::wstring utf8_to_utf16(const std::string_view value) {
@@ -581,6 +582,9 @@ struct ViewerState {
     bool interactive{};
     bool control_closing{};
     rwn::desktop::InputFocusReleaseGate input_focus;
+    // Window thread only: keys this Viewer last observed as held. Sent
+    // periodically so the Mac releases any key whose release was lost.
+    rwn::desktop::KeyboardState held_keys;
     std::atomic_uint64_t rendered_frames{};
     std::atomic_uint64_t decoded_replacements{};
     std::atomic_bool one_to_one_scale{};
@@ -638,7 +642,8 @@ struct ViewerState {
     void enqueue_control(
         PendingControlMessage message, const bool pointer_latest) {
         const bool input = message.type == rwn::desktop::ReverseControlType::input_event ||
-                           message.type == rwn::desktop::ReverseControlType::release_all_input;
+                           message.type == rwn::desktop::ReverseControlType::release_all_input ||
+                           message.type == rwn::desktop::ReverseControlType::keyboard_state;
         if ((input && !interactive) || (!tls && (!interactive || input_write == nullptr)) || stopping) return;
         std::uint64_t queued_epoch{};
         std::uint32_t queued_depth{};
@@ -755,6 +760,7 @@ struct ViewerState {
     }
 
     void enqueue_release_all() {
+        held_keys = {};
         const auto occurred_at_us = steady_timestamp_us();
         enqueue_control({
             .type = rwn::desktop::ReverseControlType::release_all_input,
@@ -763,6 +769,15 @@ struct ViewerState {
             .input_correlation_id = occurred_at_us,
             .input_trace_class =
                 rwn::desktop::VisualInputTraceClass::release_all,
+        }, false);
+    }
+
+    void enqueue_keyboard_state() {
+        if (!interactive || resume_control_required || !connection_usable) return;
+        enqueue_control({
+            .type = rwn::desktop::ReverseControlType::keyboard_state,
+            .payload = rwn::desktop::encode_keyboard_state(held_keys),
+            .occurred_at_us = steady_timestamp_us(),
         }, false);
     }
 
@@ -2674,21 +2689,47 @@ private:
             return 1;
         }
 
-        const auto raw_flags = static_cast<std::uint16_t>(
-            (key->flags & LLKHF_EXTENDED) != 0 ? RI_KEY_E0 : 0);
-        if (const auto usage =
-                rwn::platform::windows::map_windows_raw_keyboard_to_hid_usage(
-                    static_cast<std::uint16_t>(key->scanCode), raw_flags,
-                    static_cast<std::uint16_t>(key->vkCode))) {
-            enqueue_input_safely(*state, {
-                .kind = rwn::desktop::InputKind::raw_key,
-                .value_a = *usage,
-                .pressed = pressed,
-                .text = {},
-            });
-        }
+        forward_raw_key(*state, static_cast<std::uint16_t>(key->scanCode),
+            (key->flags & LLKHF_EXTENDED) != 0,
+            static_cast<std::uint16_t>(key->vkCode), pressed);
         return 1;
     }
+
+public:
+    [[nodiscard]] static bool capturing(const HWND window) noexcept {
+        return active_ != nullptr && active_->window_ == window;
+    }
+
+    // Windows silently unhooks a callback after repeated timeouts. A key that
+    // reached the window proves the hook missed it, so install it again.
+    static void reinstall(const HWND window) noexcept {
+        if (!capturing(window)) return;
+        if (active_->hook_ != nullptr) UnhookWindowsHookEx(active_->hook_);
+        active_->hook_ = SetWindowsHookExW(
+            WH_KEYBOARD_LL, &FocusedKeyboardCapture::hook_callback,
+            GetModuleHandleW(nullptr), 0);
+    }
+
+    static void forward_raw_key(
+        ViewerState& state, const std::uint16_t scan_code, const bool extended,
+        const std::uint16_t virtual_key, const bool pressed) {
+        const auto usage =
+            rwn::platform::windows::map_windows_raw_keyboard_to_hid_usage(
+                scan_code, static_cast<std::uint16_t>(extended ? RI_KEY_E0 : 0),
+                virtual_key);
+        if (!usage) return;
+        // Track the observed state even if enqueueing fails; the next
+        // keyboard_state report then releases what the Mac still holds.
+        if (*usage < 256U) state.held_keys.set(*usage, pressed);
+        enqueue_input_safely(state, {
+            .kind = rwn::desktop::InputKind::raw_key,
+            .value_a = *usage,
+            .pressed = pressed,
+            .text = {},
+        });
+    }
+
+private:
 
     void update_modifier_state(const DWORD virtual_key, const bool pressed) {
         switch (virtual_key) {
@@ -2759,6 +2800,24 @@ LRESULT CALLBACK window_procedure(
             }
             return 0;
         case WM_KEYDOWN:
+        case WM_KEYUP:
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+            // While capture is active the hook consumes every key. One that
+            // arrives here was skipped after a hook timeout (window thread
+            // stalled), so forward it instead of letting the Mac miss a release.
+            if (state != nullptr && state->interactive && state->tls &&
+                !state->resume_control_required && state->connection_usable &&
+                FocusedKeyboardCapture::capturing(window)) {
+                FocusedKeyboardCapture::forward_raw_key(*state,
+                    static_cast<std::uint16_t>((lparam >> 16) & 0xffU),
+                    (lparam & (1L << 24)) != 0,
+                    static_cast<std::uint16_t>(wparam),
+                    message == WM_KEYDOWN || message == WM_SYSKEYDOWN);
+                FocusedKeyboardCapture::reinstall(window);
+                return 0;
+            }
+            if (message != WM_KEYDOWN) break;
             if (state != nullptr &&
                 (GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
                 (wparam == L'1' || wparam == L'F')) {
@@ -2955,6 +3014,12 @@ LRESULT CALLBACK window_procedure(
             break;
         case WM_TIMER:
             if(wparam==0x4350U){PostMessageW(window,status_changed_message,0,0);return 0;}
+            if(wparam==keyboard_state_timer){
+                if(state && GetForegroundWindow()==window){
+                    try{state->enqueue_keyboard_state();}catch(const std::exception&){}
+                }
+                return 0;
+            }
             if (wparam == 0x52574eU) {
                 KillTimer(window, wparam);
                 PostMessageW(window, WM_CLOSE, 0, 0);
@@ -3054,7 +3119,7 @@ int run_viewer_session(HINSTANCE instance,ViewerLaunchOptions options,int show_c
         SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&state));
         struct Attachment {
             ViewerState& state;HWND window;
-            ~Attachment(){state.stop();KillTimer(window,0x4350U);
+            ~Attachment(){state.stop();KillTimer(window,0x4350U);KillTimer(window,keyboard_state_timer);
                 if(IsWindow(window)){SetWindowLongPtrW(window,GWLP_USERDATA,0);
                     if(GetForegroundWindow()==window)SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));}}
         } attachment{state,window};
@@ -3098,8 +3163,11 @@ int run_viewer_session(HINSTANCE instance,ViewerLaunchOptions options,int show_c
             if(resumed)state.set_status(L"Reconnected. Click once in the picture to resume control.");
             if(options.text_clipboard && !state.tls->clipboard_allowed())
                 throw std::runtime_error("Mac has not enabled text clipboard sharing. Update/authorize the Mac agent first.");
-            if (options.interactive && options.probe_seconds == 0)
+            if (options.interactive && options.probe_seconds == 0) {
                 keyboard_capture.emplace(window);
+                if(!SetTimer(window,keyboard_state_timer,250,nullptr))
+                    throw std::runtime_error("keyboard state timer failed");
+            }
             state.control_writer = std::jthread([&state] { control_writer_loop(state); });
             if(state.tls->clipboard_allowed()){
                 if(!SetTimer(window,0x4350U,250,nullptr))throw std::runtime_error("clipboard status timer failed");

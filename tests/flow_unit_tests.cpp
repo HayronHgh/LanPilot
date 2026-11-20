@@ -2346,6 +2346,68 @@ void desktop_transport_routes_media_pointer_input_and_clipboard() {
               "繁中 clipboard");
 }
 
+void keyboard_state_reconciles_only_lost_releases() {
+    using enum rwn::desktop::InputKind;
+    RecordingInputBackend backend;
+    rwn::desktop::InputReceiver receiver(backend);
+    const auto authorization = desktop_authorization();
+    // Viewer timestamps are a different clock; the local clock stamps holds.
+    RWN_CHECK(receiver.receive(
+        {.kind = raw_key, .sequence = 1, .occurred_at_us = 900000000,
+         .value_a = 0xe1, .pressed = true, .text = {}}, true, authorization, 1000));
+    RWN_CHECK(receiver.receive(
+        {.kind = raw_key, .sequence = 2, .occurred_at_us = 900000001,
+         .value_a = 0x07, .pressed = true, .text = {}}, true, authorization, 1000));
+    RWN_CHECK(!receiver.keyboard_state_seen());
+
+    rwn::desktop::KeyboardState state;
+    state.set(0x07, true);
+    state.set(0x08, true);  // Never pressed remotely: must not be synthesized.
+    const auto wire = rwn::desktop::encode_keyboard_state(state);
+    RWN_CHECK(wire.size() == 32U);
+    RWN_CHECK(rwn::desktop::decode_keyboard_state(wire) == state);
+    RWN_CHECK(receiver.reconcile_keys(state, 2000) == 1);  // Shift release was lost.
+    RWN_CHECK(receiver.keyboard_state_seen());
+    RWN_CHECK(backend.keys.size() == 3U);
+    RWN_CHECK((backend.keys.back() == std::pair{std::uint32_t{0xe1}, false}));
+
+    // D stays confirmed, so the backstop keeps it until confirmations stop.
+    RWN_CHECK(receiver.reconcile_keys(state, 6000000) == 0);
+    RWN_CHECK(receiver.release_stuck_keys(6500000, std::chrono::seconds{5}) == 0);
+    RWN_CHECK(receiver.release_stuck_keys(11000001, std::chrono::seconds{5}) == 1);
+    RWN_CHECK((backend.keys.back() == std::pair{std::uint32_t{0x07}, false}));
+    RWN_CHECK(receiver.reconcile_keys({}, 12000000) == 0);
+
+    bool rejected = false;
+    try { state.set(0x02, true); } catch (const std::invalid_argument&) { rejected = true; }
+    RWN_CHECK(rejected);
+    rejected = false;
+    try {
+        static_cast<void>(rwn::desktop::decode_keyboard_state(
+            std::vector<std::byte>(31U)));
+    } catch (const std::invalid_argument&) { rejected = true; }
+    RWN_CHECK(rejected);
+    rejected = false;
+    auto reserved = wire;
+    reserved[0] = std::byte{0x01};
+    try {
+        static_cast<void>(rwn::desktop::decode_keyboard_state(reserved));
+    } catch (const std::invalid_argument&) { rejected = true; }
+    RWN_CHECK(rejected);
+
+    const rwn::desktop::ReverseControlHeader header{
+        .type = rwn::desktop::ReverseControlType::keyboard_state,
+        .payload_size = 32U,
+        .input_epoch = 1,
+        .sequence = 1,
+        .occurred_at_us = 1,
+    };
+    const auto decoded = rwn::desktop::decode_reverse_control_header(
+        rwn::desktop::encode_reverse_control_header(header));
+    RWN_CHECK(decoded == header);
+    rwn::desktop::validate_reverse_control_payload(decoded, wire);
+}
+
 void input_conformance_handles_unicode_coordinates_and_stuck_keys() {
     using enum rwn::desktop::InputKind;
     RecordingInputBackend backend;
@@ -4688,6 +4750,7 @@ int main() {
     runner.run("transport verification reports impairment and correctness", transport_verification_reports_impairment_and_correctness);
     runner.run("desktop transport routes media and ordered control", desktop_transport_routes_media_pointer_input_and_clipboard);
     runner.run("input conformance handles Unicode and stuck keys", input_conformance_handles_unicode_coordinates_and_stuck_keys);
+    runner.run("keyboard state reconciles only lost releases", keyboard_state_reconciles_only_lost_releases);
     runner.run("input epoch release invalidates only explicitly", input_epoch_release_invalidates_only_when_explicit);
     runner.run("full snapshot transactions are exact and recoverable", full_snapshot_transactions_are_exact_atomic_and_recoverable);
     runner.run("snapshot wire drain is bounded and converges to latest", snapshot_wire_drain_is_bounded_and_converges_to_latest);
