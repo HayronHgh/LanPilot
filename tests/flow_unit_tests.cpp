@@ -2346,6 +2346,40 @@ void desktop_transport_routes_media_pointer_input_and_clipboard() {
               "繁中 clipboard");
 }
 
+void pcm_stream_frames_round_trip_and_reject_bad_framing() {
+    rwn::audio::PcmStreamFrame frame{
+        .sequence = 7,
+        .captured_at_us = 123456,
+        .frame = {.interleaved_samples = std::vector<std::int16_t>(
+            rwn::audio::opus_channels * rwn::audio::opus_frame_samples)},
+    };
+    for (std::size_t i = 0; i < frame.frame.interleaved_samples.size(); ++i) {
+        frame.frame.interleaved_samples[i] = static_cast<std::int16_t>(
+            static_cast<int>(i * 37U % 65536U) - 32768);
+    }
+    const auto wire = rwn::audio::encode_pcm_stream_frame(frame);
+    RWN_CHECK(wire.size() == rwn::audio::pcm_stream_frame_size);
+    const auto decoded = rwn::audio::decode_pcm_stream_frame(wire);
+    RWN_CHECK(decoded.sequence == 7 && decoded.captured_at_us == 123456);
+    RWN_CHECK(decoded.frame.interleaved_samples == frame.frame.interleaved_samples);
+    const auto rejected = [](std::vector<std::byte> bytes) {
+        try { static_cast<void>(rwn::audio::decode_pcm_stream_frame(bytes)); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    auto bad_magic = wire; bad_magic[0] = std::byte{'X'};
+    auto bad_rate = wire; bad_rate[8] = std::byte{0x45};
+    auto zero_sequence = wire;
+    std::fill(zero_sequence.begin() + 16, zero_sequence.begin() + 24, std::byte{});
+    RWN_CHECK(rejected(bad_magic) && rejected(bad_rate) && rejected(zero_sequence));
+    RWN_CHECK(rejected({wire.begin(), wire.end() - 1}));
+    frame.sequence = 0;
+    bool unsent = false;
+    try { static_cast<void>(rwn::audio::encode_pcm_stream_frame(frame)); }
+    catch (const std::invalid_argument&) { unsent = true; }
+    RWN_CHECK(unsent);
+}
+
 void keyboard_state_reconciles_only_lost_releases() {
     using enum rwn::desktop::InputKind;
     RecordingInputBackend backend;
@@ -4655,6 +4689,7 @@ int main() {
     rwn::test::Runner runner;
     runner.run("pairing requires both confirmations and durable completion", pairing_consent_tests::workflow);
     runner.run("independent TCP channels bind and revoke together", channel_tests::workflow);
+    runner.run("audio channel binds only to the admitted session and peer", channel_tests::audio_workflow);
     runner.run("text clipboard epoch and concurrent copy convergence",text_clipboard_tests::workflow);
     runner.run("bidirectional clipboard sidecars require opt in and suppress echoes",text_clipboard_tests::pump_workflow);
     runner.run("snapshot GPU batch remains row aligned independent of wire chunks", [] {
@@ -4751,6 +4786,7 @@ int main() {
     runner.run("desktop transport routes media and ordered control", desktop_transport_routes_media_pointer_input_and_clipboard);
     runner.run("input conformance handles Unicode and stuck keys", input_conformance_handles_unicode_coordinates_and_stuck_keys);
     runner.run("keyboard state reconciles only lost releases", keyboard_state_reconciles_only_lost_releases);
+    runner.run("PCM stream frames round trip and reject bad framing", pcm_stream_frames_round_trip_and_reject_bad_framing);
     runner.run("input epoch release invalidates only explicitly", input_epoch_release_invalidates_only_when_explicit);
     runner.run("full snapshot transactions are exact and recoverable", full_snapshot_transactions_are_exact_atomic_and_recoverable);
     runner.run("snapshot wire drain is bounded and converges to latest", snapshot_wire_drain_is_bounded_and_converges_to_latest);

@@ -221,12 +221,37 @@ inline void security() {
     hello.channel = TcpChannel::control;
     check(!session.attach(hello, peer(), 1, now)); // Must be a distinct socket.
     check(session.attach(hello, peer(), 2, now));
-    hello.channel = static_cast<TcpChannel>(3); // Agent belongs to SSH, not TCP.
+    hello.channel = TcpChannel::audio; // Optional audio never takes a desktop slot.
     rejects([&] { (void)session.attach(hello, peer(), 3, now); });
-    auto agent_wire = bytes; agent_wire[5] = std::byte{3};
+    auto agent_wire = bytes; agent_wire[5] = std::byte{4}; // Agent belongs to SSH, not TCP.
     rejects([&] { (void)decode_channel_hello(agent_wire); });
     check(!session.active(TcpChannel::visual, 1, expires));
     session.disconnect(1);
     check(!session.active(TcpChannel::control, 2, now));
+}
+// Audio is a Viewer-initiated third channel bound to the admitted session,
+// generation and client certificate; it never occupies a desktop slot.
+inline void audio_workflow() {
+    const auto now = std::chrono::steady_clock::now();
+    const auto expires = now + std::chrono::minutes(30);
+    const ChannelHello issued{TcpChannel::visual, id(), 1};
+    const ChannelHello audio{TcpChannel::audio, id(), 1};
+    check(decode_channel_hello(encode_channel_hello(audio)).channel == TcpChannel::audio);
+    const auto admitted = peer().certificate_sha256;
+    check(audio_channel_admissible(audio, issued, admitted, peer(), expires, now));
+    auto other_peer = peer();
+    other_peer.certificate_sha256[0] = 8;
+    check(!audio_channel_admissible(audio, issued, admitted, other_peer, expires, now));
+    auto other_session = audio;
+    other_session.session_id[1] = 2;
+    check(!audio_channel_admissible(other_session, issued, admitted, peer(), expires, now));
+    check(!audio_channel_admissible({TcpChannel::audio, id(), 2}, issued, admitted, peer(), expires, now));
+    check(!audio_channel_admissible({TcpChannel::control, id(), 1}, issued, admitted, peer(), expires, now));
+    check(!audio_channel_admissible(audio, issued, admitted, peer(), expires, expires));
+    TcpChannelSession session(id(), 1, admitted, {true, true}, expires);
+    rejects([&] { static_cast<void>(session.attach(audio, peer(), 3, now)); });
+    auto unknown = encode_channel_hello(audio);
+    unknown[5] = std::byte{4};
+    rejects([&] { static_cast<void>(decode_channel_hello(unknown)); });
 }
 } // namespace channel_tests

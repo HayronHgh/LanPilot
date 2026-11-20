@@ -10,7 +10,9 @@
 
 namespace rwn::transport {
 
-enum class TcpChannel : std::uint8_t { visual = 1, control = 2 };
+// audio is optional and Viewer-initiated after admission. It never joins
+// TcpChannelSession; audio_channel_admissible binds it to that session.
+enum class TcpChannel : std::uint8_t { visual = 1, control = 2, audio = 3 };
 using ChannelSessionId = std::array<std::uint8_t, 16>;
 
 // Sent only AFTER a mutually authenticated TLS 1.3 handshake. This header
@@ -24,6 +26,14 @@ inline constexpr std::size_t channel_hello_bytes = 32;
 [[nodiscard]] std::array<std::byte, channel_hello_bytes> encode_channel_hello(
     const ChannelHello& hello);
 [[nodiscard]] ChannelHello decode_channel_hello(std::span<const std::byte> bytes);
+// True only for an audio hello naming the admitted session from the same
+// verified client certificate, before that session expires.
+[[nodiscard]] bool audio_channel_admissible(
+    const ChannelHello& hello, const ChannelHello& issued,
+    const CertificateSha256& admitted_peer,
+    const AuthenticatedPeerEvidence& verified_peer,
+    std::chrono::steady_clock::time_point expires_at,
+    std::chrono::steady_clock::time_point now);
 
 struct ChannelGrants {
     bool visual{};

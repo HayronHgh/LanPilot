@@ -3,6 +3,7 @@
 #include "rwn/desktop/visual_trace.hpp"
 #include "rwn/desktop/session_reconnect.hpp"
 #include "rwn/core/content_hash.hpp"
+#include "rwn/platform/windows/audio_runtime.hpp"
 #include "rwn/platform/windows/desktop_runtime.hpp"
 #include "d3d11_renderer.hpp"
 #include "tls_preview.hpp"
@@ -551,6 +552,8 @@ struct ViewerState {
     HANDLE error_read{};
     HANDLE input_write{};
     std::unique_ptr<rwn::viewer::TlsPreviewConnection> tls;
+    std::jthread audio_player;
+    std::atomic_uint64_t audio_frames{};
     std::jthread tls_heartbeat;
     bool read_visual(std::span<std::byte> bytes, bool message_start = false) {
         return tls ? tls->read(bytes, message_start) : read_exact(output_read,bytes);
@@ -952,6 +955,7 @@ struct ViewerState {
             if (control_writer.joinable()) control_writer.join();
         }
         if (tls) tls->cancel();
+        if(audio_player.joinable()){audio_player.request_stop();audio_player.join();}
         if(clipboard_reader.joinable())clipboard_reader.join();
         if(clipboard){
             auto retiring=std::move(clipboard);
@@ -3052,6 +3056,33 @@ bool wait_for_reconnect(HWND window,std::chrono::milliseconds delay){
     return false;
 }
 
+// Mac system audio is best-effort: an agent without audio, a missing output
+// device or a dropped audio channel never affects the desktop session.
+void play_session_audio(ViewerState& state, const std::stop_token& stop) {
+    try {
+        state.tls->open_audio();
+        std::optional<rwn::platform::windows::WindowsAudioPlayback> playback;
+        std::deque<rwn::audio::PcmFrame> pending;
+        bool primed{};
+        while (!stop.stop_requested() && !state.stopping) {
+            auto frame = state.tls->read_audio(stop);
+            if (!frame) break;
+            state.audio_frames.fetch_add(1, std::memory_order_relaxed);
+            pending.push_back(std::move(frame->frame));
+            // Prebuffer 60 ms; cap queued latency at 160 ms when clocks drift.
+            if (!primed && pending.size() < 3U) continue;
+            primed = true;
+            while (pending.size() > 8U) pending.pop_front();
+            if (!playback) playback.emplace();
+            playback->play(pending.front(), std::chrono::milliseconds(500));
+            pending.pop_front();
+        }
+    } catch (const std::exception& error) {
+        if (!stop.stop_requested() && !state.stopping)
+            OutputDebugStringA((std::string("LanPilot audio stopped: ") + error.what() + "\n").c_str());
+    }
+}
+
 void discard_session_input(HWND window){
     MSG message{};
     // Only this viewer's queued input is retired. Other applications' input and
@@ -3192,6 +3223,9 @@ int run_viewer_session(HINSTANCE instance,ViewerLaunchOptions options,int show_c
                     }}catch(const std::exception& error){if(!state.stopping){state.report_tls_failure(error);state.tls->cancel();}}
                 });
             }
+            state.audio_player = std::jthread([&state](std::stop_token stop) {
+                play_session_audio(state, stop);
+            });
             state.frame_reader = std::jthread([&state,&options] {
                 frame_reader_loop(state,true,options.raw_rect_experimental,options.exact_only);
             });
@@ -3228,7 +3262,8 @@ int run_viewer_session(HINSTANCE instance,ViewerLaunchOptions options,int show_c
         if (options.tls && options.probe_seconds) {
             std::cerr << "tls_viewer_probe present_receipts=" << state.successful_present_receipts.load()
                       << " runtime_failed=" << state.tls_runtime_failed.load()
-                      << " snapshot_commits=" << state.snapshot_commits << '\n';
+                      << " snapshot_commits=" << state.snapshot_commits
+                      << " audio_frames=" << state.audio_frames.load() << '\n';
             return state.successful_present_receipts.load() > 0 &&
                 !state.tls_runtime_failed.load() ? 0 : 3;
         }

@@ -3,15 +3,26 @@
 #include "rwn/transport/channel_session.hpp"
 #include "rwn/transport/tls_stream_io.hpp"
 #include "rwn/desktop/text_clipboard.hpp"
+#include "rwn/audio/audio.hpp"
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <optional>
 
 namespace rwn::viewer {
 class TlsPreviewConnection {
     std::array<std::unique_ptr<transport::TlsByteChannel>,2> channels_;
     std::array<std::unique_ptr<transport::TlsStreamIo>,2> io_;
     bool clipboard_allowed_{};
+    // Optional third channel for Mac system audio, opened after admission.
+    platform::windows::SchannelFallbackClientOptions audio_options_;
+    transport::TransportEndpoint audio_endpoint_;
+    transport::ChannelHello issued_{};
+    core::CancellationSource audio_stop_;
+    std::mutex audio_mutex_;
+    std::unique_ptr<transport::TlsByteChannel> audio_channel_;
+    std::unique_ptr<transport::TlsStreamIo> audio_io_;
 public:
     static std::string ascii(std::wstring_view value) {
         std::string result;
@@ -33,7 +44,9 @@ public:
         return bytes;
     }
     TlsPreviewConnection(const platform::windows::SchannelFallbackClientOptions& options,
-                         const transport::TransportEndpoint& endpoint, bool request_input = false) {
+                         const transport::TransportEndpoint& endpoint, bool request_input = false)
+        : audio_options_(options), audio_endpoint_(endpoint) {
+        audio_options_.establishment_stop = audio_stop_.token();
         using namespace std::chrono_literals;
         auto check_stop=[&]{if(options.establishment_stop.stop_requested())throw transport::TlsTransportInterrupted(transport::TlsTransportInterrupted::Reason::cancelled,"TLS admission cancelled");};
         check_stop();channels_[0]=platform::windows::connect_dedicated_tls_channel(options,endpoint);
@@ -63,7 +76,35 @@ public:
         transport::validate_channel_admission(
             transport::decode_channel_admission(admission), issued, request_input);
         clipboard_allowed_=request_input && transport::decode_channel_admission(admission).grants.text_clipboard;
+        issued_=issued;
         check_stop();
+    }
+    // Throws when the Mac does not offer audio (for example an older agent);
+    // callers treat that as "no audio", never as a desktop session failure.
+    void open_audio() {
+        using namespace std::chrono_literals;
+        auto channel=platform::windows::connect_dedicated_tls_channel(audio_options_,audio_endpoint_);
+        auto io=std::make_unique<transport::TlsStreamIo>(*channel);
+        {
+            std::lock_guard lock(audio_mutex_);
+            if(audio_stop_.token().stop_requested())throw std::runtime_error("audio channel cancelled");
+            audio_channel_=std::move(channel);
+        }
+        const auto hello=transport::encode_channel_hello({transport::TcpChannel::audio,issued_.session_id,issued_.generation});
+        io->write_all(hello,5s);
+        std::array<std::byte,transport::channel_hello_bytes> echo{};
+        io->read_exact(echo,5s);
+        if(echo!=hello)throw std::runtime_error("TLS audio admission rejected");
+        audio_io_=std::move(io);
+    }
+    // Waits in short slices so an idle (silent) Mac never times the channel out.
+    std::optional<audio::PcmStreamFrame> read_audio(const std::stop_token& stop){
+        if(!audio_io_)throw std::logic_error("audio channel is not open");
+        while(!audio_io_->wait_message_start(std::chrono::milliseconds(500)))
+            if(stop.stop_requested())return {};
+        std::vector<std::byte> wire(audio::pcm_stream_frame_size);
+        audio_io_->read_exact(wire,std::chrono::seconds(5));
+        return audio::decode_pcm_stream_frame(wire);
     }
     bool clipboard_allowed()const noexcept{return clipboard_allowed_;}
     std::optional<desktop::TextClipboardMessage> read_clipboard(){
@@ -90,7 +131,12 @@ public:
         try { io_[1]->write_all(bytes,std::chrono::seconds(10)); }
         catch (...) { cancel(); throw; }
     }
-    void cancel() noexcept { for (auto& channel : channels_) if (channel) channel->cancel(); }
+    void cancel() noexcept {
+        for (auto& channel : channels_) if (channel) channel->cancel();
+        audio_stop_.request_stop();
+        std::lock_guard lock(audio_mutex_);
+        if (audio_channel_) audio_channel_->cancel();
+    }
     ~TlsPreviewConnection() { cancel(); }
 };
 }

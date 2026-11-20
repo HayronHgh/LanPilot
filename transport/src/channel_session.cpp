@@ -14,7 +14,7 @@ std::size_t index(TcpChannel channel) {
     return value - 1;
 }
 void validate(const ChannelHello& hello) {
-    static_cast<void>(index(hello.channel));
+    if (hello.channel != TcpChannel::audio) static_cast<void>(index(hello.channel));
     if (!nonzero(hello.session_id) || hello.generation == 0)
         throw std::invalid_argument("empty channel session identity");
 }
@@ -45,6 +45,18 @@ ChannelHello decode_channel_hello(std::span<const std::byte> bytes) {
         hello.generation = (hello.generation << 8) | std::to_integer<std::uint8_t>(bytes[24+i]);
     validate(hello);
     return hello;
+}
+
+bool audio_channel_admissible(const ChannelHello& hello, const ChannelHello& issued,
+    const CertificateSha256& admitted_peer, const AuthenticatedPeerEvidence& verified_peer,
+    std::chrono::steady_clock::time_point expires_at, std::chrono::steady_clock::time_point now) {
+    validate(hello);
+    validate(issued);
+    validate_authenticated_peer_evidence(verified_peer);
+    return hello.channel == TcpChannel::audio && issued.channel == TcpChannel::visual &&
+        hello.session_id == issued.session_id && hello.generation == issued.generation &&
+        nonzero(admitted_peer) && verified_peer.certificate_sha256 == admitted_peer &&
+        now < expires_at;
 }
 
 std::array<std::byte, channel_admission_bytes> encode_channel_admission(const ChannelAdmission& admission) {

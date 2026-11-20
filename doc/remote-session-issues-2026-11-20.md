@@ -8,7 +8,7 @@ Windows、動畫畫面比 AnyDesk 差。本文依原始碼逐一判斷原因，�
 | --- | --- | --- | --- |
 | 1 | E、D 等按鍵送不出去 | 已實作修正（2026-11-20）：旗標由 Agent 狀態推導、按鍵狀態自動對齊；待實機驗收 | 高 |
 | 2 | 剪貼簿沒有過去 | 已確認：預設關閉、重連後關閉、只同步啟用後的新複製 | 高（修改小） |
-| 3 | 沒有聲音 | 已確認：桌面工作階段沒有音訊通道 | 中（工作量大） |
+| 3 | 沒有聲音 | 已實作音訊通道（2026-11-20），待實機驗收 | 中 |
 | 4 | 動畫輸給 AnyDesk | 已確認：目前連線設定是 `exact-only` 無損未壓縮模式 | 高 |
 
 ## 1. 按鍵送不出去（E、D）
@@ -162,15 +162,28 @@ Agent 的 `TlsPreviewSession` 也只接受這兩條 socket。
 - Windows：`WindowsAudioPlayback`（WASAPI shared-mode）。
 - 還缺：安裝包沒有附 libopus、沒有兩台機器的實測證據（見 `doc/audio-runtime.md`）。
 
-### 修正方向
+### 實作（2026-11-20）
 
-1. 在 TLS 工作階段新增第三條 `audio` 通道，用同一個 port 和同一組 admission，並沿用
-   `desktop.view` 授權。音訊用獨立的 socket，就不會被大型畫面資料堵住（避免 TCP head-of-line blocking）。
-2. Mac：在同一個 SCStream 開啟 `capturesAudio`，並設定 `excludesCurrentProcessAudio`。
-   以 20 ms 為一個 frame，用 Opus 編碼。螢幕錄影權限已經授予，系統聲音不需要再另外授權。
-3. Windows：jitter buffer（目標 40–60 ms）接到 WASAPI 播放。標題列加上靜音開關。
-4. 兩邊的安裝包都附上 libopus（BSD 授權）。
-5. 驗收：兩台機器播放測試音，量測延遲和斷音次數，並確認影音同步誤差。
+1. **第三條 TLS 通道 `TcpChannel::audio = 3`，由 Viewer 發起。** 雙通道 admission 完成後，
+   Viewer 用同一組憑證設定再連一次同一個 port，送出 `ChannelHello{audio, session, generation}`。
+   Mac 只在 admission 後 10 秒內保留 listener，接受一條音訊連線；
+   `audio_channel_admissible` 要求同一個 session、generation、同一張已驗證的用戶端憑證，
+   而且 session 尚未過期。音訊不佔用 `TcpChannelSession` 的桌面通道位置。
+   音訊用獨立的 socket，不會被大張畫面堵住（避免 TCP head-of-line blocking）。
+2. **未壓縮 PCM，不需要 libopus。** 每個 frame 20 ms、48 kHz、立體聲、16-bit，
+   固定 3,872 bytes（32-byte `RWA1` 標頭加樣本），約 1.5 Mbit/s，在區網內可以接受。
+   Mac 使用既有的 `MacosSystemAudioCapture`（ScreenCaptureKit 系統聲音），
+   沿用已經授予的螢幕錄影權限。
+3. **Windows 播放。** 預先緩衝 3 個 frame（60 ms），佇列上限 8 個 frame（160 ms），
+   超過就丟最舊的，避免兩端時鐘漂移讓延遲越積越多；以 `WindowsAudioPlayback`（WASAPI）播放。
+4. **音訊只是盡力而為。** 舊版 Agent、沒有輸出裝置、音訊連線中斷，都只會讓聲音停止，
+   不會中斷桌面工作階段。舊版 Viewer 不會連音訊通道，Agent 等 10 秒後就關閉 listener。
+5. Probe 模式會輸出 `audio_frames=N`，用來實機確認有收到聲音。
+
+尚未完成：
+
+- 實機驗收：兩台機器播放測試音，確認聲音、延遲、斷音次數。
+- 靜音開關、Opus 壓縮（遠端或 Wi-Fi 頻寬不足時才需要）、影音同步量測。
 
 ## 4. 動畫比 AnyDesk 差
 
@@ -203,6 +216,6 @@ AnyDesk 用的是有損編碼，加上自適應位元率和幀率，動畫時犧
 ## 建議順序
 
 1. 按鍵狀態自動回復（已實作，待實機驗收）。
-2. 音訊通道。
+2. 音訊通道（已實作，待實機驗收）。
 3. 剪貼簿第一步（修改小、確認度高）。
 4. 動畫：先試 `h264-only`，再做混合模式（使用者決定先不做）。
