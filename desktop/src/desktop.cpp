@@ -221,7 +221,7 @@ void validate_visual_header(const VisualMessageHeader& header) {
 void validate_reverse_control_header(const ReverseControlHeader& header) {
     const auto type = static_cast<std::uint8_t>(header.type);
     if (type < static_cast<std::uint8_t>(ReverseControlType::input_event) ||
-        type > static_cast<std::uint8_t>(ReverseControlType::text_clipboard) ||
+        type > static_cast<std::uint8_t>(ReverseControlType::keyboard_state) ||
         header.flags != 0 || header.input_epoch == 0 || header.sequence == 0 ||
         header.occurred_at_us == 0 ||
         header.payload_size > maximum_reverse_control_payload) {
@@ -537,6 +537,9 @@ void validate_reverse_control_payload(
         case ReverseControlType::frame_commit_ack:
             static_cast<void>(decode_frame_commit_ack(payload));
             return;
+        case ReverseControlType::keyboard_state:
+            static_cast<void>(decode_keyboard_state(payload));
+            return;
     }
     throw std::invalid_argument("unknown reverse control type");
 }
@@ -792,6 +795,38 @@ FrameCommitAck decode_frame_commit_ack(
     std::copy(digest.begin(), digest.end(), ack.canonical_sha256.begin());
     static_cast<void>(encode_frame_commit_ack(ack));
     return ack;
+}
+
+bool KeyboardState::held(const std::uint32_t usage) const noexcept {
+    if (usage >= pressed.size() * 8U) return false;
+    return (std::to_integer<unsigned>(pressed[usage / 8U]) >> (usage % 8U) & 1U) != 0;
+}
+
+void KeyboardState::set(const std::uint32_t usage, const bool held) {
+    // Usages 0..3 are HID error codes, never keys.
+    if (usage < 4U || usage >= pressed.size() * 8U) {
+        throw std::invalid_argument("keyboard state usage outside bounds");
+    }
+    const auto bit = std::byte{static_cast<unsigned char>(1U << (usage % 8U))};
+    if (held) pressed[usage / 8U] |= bit;
+    else pressed[usage / 8U] &= ~bit;
+}
+
+std::vector<std::byte> encode_keyboard_state(const KeyboardState& state) {
+    if ((std::to_integer<unsigned>(state.pressed[0]) & 0x0fU) != 0) {
+        throw std::invalid_argument("invalid keyboard state");
+    }
+    return {state.pressed.begin(), state.pressed.end()};
+}
+
+KeyboardState decode_keyboard_state(const std::span<const std::byte> payload) {
+    KeyboardState state;
+    if (payload.size() != state.pressed.size()) {
+        throw std::invalid_argument("invalid keyboard state payload");
+    }
+    std::copy(payload.begin(), payload.end(), state.pressed.begin());
+    static_cast<void>(encode_keyboard_state(state));
+    return state;
 }
 
 bool frame_commit_ack_matches(
@@ -1334,7 +1369,8 @@ InputEvent decode_input_event(const std::span<const std::byte> bytes) {
 
 bool InputReceiver::receive(
     const InputEvent& event, const bool reliable,
-    const core::AuthorizationResult& authorization) {
+    const core::AuthorizationResult& authorization,
+    const std::optional<std::uint64_t> local_now_us) {
     if (closed_) return false;
     if (!authorization.permits(core::Capability::desktop_control)) {
         throw std::logic_error("desktop control capability is required");
@@ -1366,7 +1402,8 @@ bool InputReceiver::receive(
         case InputKind::raw_key:
             backend_.raw_key(event.value_a, event.pressed);
             if (event.pressed) {
-                pressed_keys_[event.value_a] = event.occurred_at_us;
+                pressed_keys_[event.value_a] =
+                    local_now_us.value_or(event.occurred_at_us);
             } else {
                 pressed_keys_.erase(event.value_a);
             }
@@ -1415,6 +1452,22 @@ std::size_t InputReceiver::release_stuck_keys(
         pressed_keys_.erase(usage);
     }
     return stale.size();
+}
+
+std::size_t InputReceiver::reconcile_keys(
+    const KeyboardState& state, const std::uint64_t local_now_us) {
+    if (closed_) return 0;
+    keyboard_state_seen_ = true;
+    std::vector<std::uint32_t> released;
+    for (auto& [usage, held_since] : pressed_keys_) {
+        if (state.held(usage)) held_since = local_now_us;
+        else released.push_back(usage);
+    }
+    for (const auto usage : released) {
+        backend_.raw_key(usage, false);
+        pressed_keys_.erase(usage);
+    }
+    return released.size();
 }
 
 std::size_t InputReceiver::release_all_keys() {

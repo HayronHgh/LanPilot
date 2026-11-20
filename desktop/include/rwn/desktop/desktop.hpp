@@ -377,6 +377,7 @@ enum class ReverseControlType : std::uint8_t {
     frame_commit_ack = 4,
     ping = 5,
     text_clipboard = 6,
+    keyboard_state = 7,
 };
 
 struct ReverseControlHeader {
@@ -409,6 +410,21 @@ struct FrameCommitAck {
     std::uint64_t representation_epoch,
     std::uint64_t frame_id,
     const std::array<std::byte, 32>& canonical_sha256) noexcept;
+
+// Keys the Viewer currently observes as held, one bit per HID usage. The
+// receiver only releases keys missing here; it never synthesizes a press.
+struct KeyboardState {
+    std::array<std::byte, 32> pressed{};
+
+    [[nodiscard]] bool held(std::uint32_t usage) const noexcept;
+    void set(std::uint32_t usage, bool held);
+    [[nodiscard]] bool operator==(const KeyboardState&) const = default;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_keyboard_state(
+    const KeyboardState& state);
+[[nodiscard]] KeyboardState decode_keyboard_state(
+    std::span<const std::byte> payload);
 
 [[nodiscard]] std::vector<std::byte> encode_reverse_control_header(
     const ReverseControlHeader& header);
@@ -474,9 +490,19 @@ public:
         std::size_t remaining{};
     };
     explicit InputReceiver(InputBackend& backend) : backend_(backend) {}
+    // local_now_us, when given, stamps held keys with the receiver clock so
+    // stuck-key deadlines never compare timestamps from another host.
     [[nodiscard]] bool receive(
         const InputEvent& event, bool reliable,
-        const core::AuthorizationResult& authorization);
+        const core::AuthorizationResult& authorization,
+        std::optional<std::uint64_t> local_now_us = std::nullopt);
+    // Releases keys the Viewer no longer holds and refreshes the hold time of
+    // keys it still confirms. Returns the number of keys released.
+    [[nodiscard]] std::size_t reconcile_keys(
+        const KeyboardState& state, std::uint64_t local_now_us);
+    [[nodiscard]] bool keyboard_state_seen() const noexcept {
+        return keyboard_state_seen_;
+    }
     [[nodiscard]] std::size_t release_stuck_keys(
         std::uint64_t now_us, std::chrono::milliseconds maximum_hold);
     [[nodiscard]] std::size_t release_all_keys();
@@ -497,6 +523,7 @@ private:
     std::map<std::uint32_t, std::uint64_t> pressed_keys_;
     std::set<std::uint8_t> pressed_buttons_;
     std::uint64_t input_epoch_{1};
+    bool keyboard_state_seen_{};
     bool closed_{};
 };
 

@@ -63,6 +63,24 @@ void validate_pcm_frame(const PcmFrame& frame);
 [[nodiscard]] std::vector<std::byte> encode_packet(const AudioPacket& packet);
 [[nodiscard]] AudioPacket decode_packet(std::span<const std::byte> bytes);
 
+// Desktop session audio: uncompressed 20 ms stereo PCM frames on the
+// authenticated audio TLS channel. About 1.5 Mbit/s, so a LAN session needs no
+// codec library. Every frame has the same fixed size on the wire.
+inline constexpr std::size_t pcm_stream_header_size = 32;
+inline constexpr std::size_t pcm_stream_frame_size = pcm_stream_header_size +
+    static_cast<std::size_t>(opus_frame_samples) * opus_channels * 2U;
+
+struct PcmStreamFrame {
+    std::uint64_t sequence{};
+    std::uint64_t captured_at_us{};
+    PcmFrame frame;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_pcm_stream_frame(
+    const PcmStreamFrame& frame);
+[[nodiscard]] PcmStreamFrame decode_pcm_stream_frame(
+    std::span<const std::byte> wire);
+
 class OpusCodec {
 public:
     virtual ~OpusCodec() = default;

@@ -1,6 +1,7 @@
 add_library(rwn_audio
   src/audio.cpp
   src/dynamic_opus.cpp
+  src/pcm_stream.cpp
 )
 
 target_include_directories(rwn_audio PUBLIC include)

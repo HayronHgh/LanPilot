@@ -238,7 +238,11 @@ public:
     void pointer_wheel(std::int32_t delta, bool horizontal) override;
 
 private:
+    // Posted events carry flags derived only from modifiers this backend holds,
+    // so a lost release or system Fn state cannot turn letters into shortcuts.
+    [[nodiscard]] std::uint64_t event_flags(std::uint32_t hid_usage) const;
     std::uint8_t pressed_pointer_buttons_{};
+    std::uint8_t held_modifiers_{};  // Bit n is HID usage 0xe0 + n.
     desktop::PointerClickTracker click_tracker_;
 };
 

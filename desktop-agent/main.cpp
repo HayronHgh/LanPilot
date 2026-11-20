@@ -356,7 +356,8 @@ int stream_h264_stdio(
                     // racing an in-progress injection is drained by this owner.
                     if (stop.stop_requested()) break;
                     if (!interactive && (header.type == rwn::desktop::ReverseControlType::input_event ||
-                        header.type == rwn::desktop::ReverseControlType::release_all_input))
+                        header.type == rwn::desktop::ReverseControlType::release_all_input ||
+                        header.type == rwn::desktop::ReverseControlType::keyboard_state))
                         throw std::invalid_argument("view-only TLS session forbids input");
                     const auto release_all = header.type ==
                         rwn::desktop::ReverseControlType::release_all_input;
@@ -410,7 +411,8 @@ int stream_h264_stdio(
                             const auto reliable = input_event->kind !=
                                 rwn::desktop::InputKind::pointer_move;
                             if (input_receiver->receive(
-                                    *input_event, reliable, authorization)) {
+                                    *input_event, reliable, authorization,
+                                    monotonic_timestamp_us())) {
                                 record_input(
                                     rwn::desktop::VisualLifecycleStage::
                                         input_injected,
@@ -431,6 +433,11 @@ int stream_h264_stdio(
                                 rwn::desktop::VisualLifecycleStage::
                                     input_release_all,
                                 monotonic_timestamp_us());
+                            break;
+                        case rwn::desktop::ReverseControlType::keyboard_state:
+                            static_cast<void>(input_receiver->reconcile_keys(
+                                rwn::desktop::decode_keyboard_state(payload),
+                                monotonic_timestamp_us()));
                             break;
                         case rwn::desktop::ReverseControlType::ping:
                             if (cancel_network) break; // TLS keepalive must not request a snapshot.
@@ -472,6 +479,12 @@ int stream_h264_stdio(
                             };
                             break;
                         }
+                    }
+                    // Backstop for a Viewer that stops confirming held keys.
+                    // Confirmed keys are refreshed every keyboard_state message.
+                    if (interactive && input_receiver->keyboard_state_seen()) {
+                        static_cast<void>(input_receiver->release_stuck_keys(
+                            monotonic_timestamp_us(), std::chrono::seconds(5)));
                     }
                 }
             } catch (...) {
